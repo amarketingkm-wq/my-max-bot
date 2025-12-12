@@ -1,0 +1,36 @@
+// database.js
+const fs = require('fs').promises;
+const path = require('path');
+
+const DB_FILE = path.join(__dirname, 'subscribers.json');
+
+async function ensureDbFile() {
+    try {
+        await fs.access(DB_FILE);
+    } catch {
+        // Если файла нет, создаем его с пустым массивом
+        await fs.writeFile(DB_FILE, JSON.stringify([]));
+    }
+}
+
+async function addSubscriber(userId) {
+    await ensureDbFile();
+    const data = await fs.readFile(DB_FILE, 'utf8');
+    const subscribers = JSON.parse(data);
+
+    if (!subscribers.includes(userId)) {
+        subscribers.push(userId);
+        await fs.writeFile(DB_FILE, JSON.stringify(subscribers, null, 2));
+        console.log(`✅ Подписчик ${userId} добавлен.`);
+        return true;
+    }
+    return false; // Уже подписан
+}
+
+async function getAllSubscribers() {
+    await ensureDbFile();
+    const data = await fs.readFile(DB_FILE, 'utf8');
+    return JSON.parse(data);
+}
+
+module.exports = { addSubscriber, getAllSubscribers };

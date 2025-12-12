@@ -1,0 +1,13 @@
+{
+  "name": "my-max-bot",
+  "version": "1.0.0",
+  "description": "Бот для рассылки в MAX",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "@maxhub/max-bot-api": "^1.0.0",
+    "dotenv": "^16.0.0"
+  }
+}

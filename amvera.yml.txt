@@ -1,0 +1,7 @@
+meta:
+  environment: nodejs-server
+  toolchain:
+    name: npm
+
+run:
+  scriptName: bot.js
