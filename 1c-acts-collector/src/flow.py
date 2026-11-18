@@ -1044,12 +1044,21 @@ def ensure_act_row(list_win: w.WindowInfo, lang: str) -> str:
     return advance_to_next_act(list_win, lang, previous="")
 
 
+def back_to_list(list_win: w.WindowInfo) -> None:
+    """Закрыть всплывшее окно и вернуть курсор в список актов."""
+    w.brief_focus(list_win.hwnd)
+    w.press_escape(list_win.hwnd)
+    time.sleep(0.2)
+    w.brief_focus(list_win.hwnd)
+
+
 def advance_to_next_act(list_win: w.WindowInfo, lang: str, previous: str) -> str:
     """Вниз, пока текущая строка снова не начнётся со слова «Акт»."""
     print("Ищу строку, которая начинается с «Акт».", flush=True)
     stuck = 0
+    empty = 0
     last = previous
-    for _ in range(30):
+    for _ in range(60):
         w.brief_focus(list_win.hwnd)
         w.press_down(list_win.hwnd)
         time.sleep(0.25)
@@ -1058,18 +1067,26 @@ def advance_to_next_act(list_win: w.WindowInfo, lang: str, previous: str) -> str
             print(f"Следующий акт: {name}", flush=True)
             return name
         if not name:
+            empty += 1
             stuck = 0
             last = ""
+            if empty % 8 == 0:
+                print("Список не отвечает, закрываю лишнее и иду дальше.", flush=True)
+                back_to_list(list_win)
             continue
+        empty = 0
         if name == last:
             stuck += 1
-            if stuck >= 2:
-                print("Строки актов закончились.", flush=True)
-                return ""
+            if stuck >= 8:
+                print("Строка списка не меняется, шагаю вниз ещё раз.", flush=True)
+                back_to_list(list_win)
+                w.press_down(list_win.hwnd)
+                stuck = 0
         else:
             stuck = 0
         last = name
-    print("Не нашёл следующую строку, которая начинается с «Акт».", flush=True)
+    print("Пока не вижу следующую строку «Акт», сбор не останавливаю.", flush=True)
+    back_to_list(list_win)
     return ""
 
 
@@ -1095,7 +1112,7 @@ def run(cfg: dict, pause: PauseController) -> None:
 
     max_acts = int(cfg.get("max_acts") or 0)
     processed = 0
-    empty_streak = 0
+    missed_steps = 0
 
     while not pause.stop:
         pause.wait_if_paused()
@@ -1117,29 +1134,34 @@ def run(cfg: dict, pause: PauseController) -> None:
                 done.discard(result.act_title)
                 print("Номер не собран, этот акт будет взят снова.", flush=True)
             processed += 1
-            empty_streak = 0 if result.status in ("ok", "partial") else empty_streak + 1
             print(
                 f"[{processed}] {result.status}: {result.act_title} | "
                 f"сумма={result.amount or '-'} | тел={result.phone or '-'}"
             )
             if result.error:
                 print(f"  ! {result.error}")
+                print("Ошибка не останавливает сбор, перехожу к следующему акту.", flush=True)
         else:
-            empty_streak += 1
-            print(f"Ошибка: {result.error}")
-
-        if empty_streak >= 5:
-            print("Слишком много ошибок подряд — остановка.")
-            break
+            print(f"Ошибка: {result.error}", flush=True)
+            print("Ошибка не останавливает сбор, перехожу к следующему акту.", flush=True)
 
         if max_acts and processed >= max_acts:
             print(f"Достигнут лимит max_acts={max_acts}")
             break
 
-        if not result.act_title and result.status == "error":
-            break
-        if not advance_to_next_act(list_win, lang, result.act_title):
-            break
+        if result.status == "error":
+            back_to_list(list_win)
+        if advance_to_next_act(list_win, lang, result.act_title):
+            missed_steps = 0
+        else:
+            missed_steps += 1
+            print(
+                f"Следующий акт пока не виден, продолжаю ({missed_steps}).",
+                flush=True,
+            )
+            if missed_steps >= 8:
+                print("Список актов больше не листается — остановка.", flush=True)
+                break
         time.sleep(cfg["delays"]["between_acts"])
 
     print(f"Готово. Таблица: {csv_path.with_suffix('.xlsx')}")
