@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 import time
 import zipfile
@@ -200,14 +201,38 @@ def write_xlsx(csv_path: Path) -> Path:
     workbook_rels = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'''
     target = csv_path.with_suffix(".xlsx")
-    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as book:
+    temporary = target.with_name(target.stem + ".writing.xlsx")
+    with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as book:
         book.writestr("[Content_Types].xml", content_types)
         book.writestr("_rels/.rels", root_rels)
         book.writestr("xl/workbook.xml", workbook)
         book.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
         book.writestr("xl/styles.xml", styles)
         book.writestr("xl/worksheets/sheet1.xml", sheet)
-    return target
+    return publish_table(temporary, target)
+
+
+def publish_table(temporary: Path, target: Path) -> Path:
+    """Подменить таблицу. Если Excel держит файл, писать рядом и не падать."""
+    try:
+        os.replace(temporary, target)
+        return target
+    except PermissionError:
+        pass
+    fallback = target.with_name(target.stem + "-новый.xlsx")
+    try:
+        os.replace(temporary, fallback)
+    except PermissionError:
+        print(
+            f"Таблица {target.name} открыта, записать её не получилось. Данные остались в csv.",
+            flush=True,
+        )
+        return target
+    print(
+        f"Таблица {target.name} открыта в Excel, записал в {fallback.name}.",
+        flush=True,
+    )
+    return fallback
 
 
 def collected_acts(csv_path: Path) -> set[str]:
@@ -246,7 +271,11 @@ def append_result(csv_path: Path, log_path: Path, result: ActResult) -> None:
     if not phone_ok and result.act_title in known:
         kept = [line for line in known if line != result.act_title]
         log_path.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
-    table = write_xlsx(csv_path)
+    try:
+        table = write_xlsx(csv_path)
+    except OSError as exc:
+        print(f"Таблицу не записал ({exc}). Сбор идёт дальше.", flush=True)
+        return
     print(f"Записано в таблицу: {table}", flush=True)
 
 
@@ -1119,39 +1148,52 @@ def run(cfg: dict, pause: PauseController) -> None:
         if pause.stop:
             break
 
-        result = process_one_act(cfg, list_win, pause, done)
-        if pause.stop or result.status == "stopped":
-            break
+        result = None
         lang = cfg["ocr"].get("lang", "eng+rus")
+        try:
+            result = process_one_act(cfg, list_win, pause, done)
+            if pause.stop or result.status == "stopped":
+                break
 
-        if result.status == "skip":
-            print(f"Пропуск (уже было): {result.act_title}")
-        elif result.act_title and result.act_title != "(не открылся)":
-            append_result(csv_path, log_path, result)
-            if revealed_phone(result.phone):
-                done.add(result.act_title)
+            if result.status == "skip":
+                print(f"Пропуск (уже было): {result.act_title}")
+            elif result.act_title and result.act_title != "(не открылся)":
+                append_result(csv_path, log_path, result)
+                if revealed_phone(result.phone):
+                    done.add(result.act_title)
+                else:
+                    done.discard(result.act_title)
+                    print("Номер не собран, этот акт будет взят снова.", flush=True)
+                processed += 1
+                print(
+                    f"[{processed}] {result.status}: {result.act_title} | "
+                    f"сумма={result.amount or '-'} | тел={result.phone or '-'}"
+                )
+                if result.error:
+                    print(f"  ! {result.error}")
+                    print("Ошибка не останавливает сбор, перехожу к следующему акту.", flush=True)
             else:
-                done.discard(result.act_title)
-                print("Номер не собран, этот акт будет взят снова.", flush=True)
-            processed += 1
-            print(
-                f"[{processed}] {result.status}: {result.act_title} | "
-                f"сумма={result.amount or '-'} | тел={result.phone or '-'}"
-            )
-            if result.error:
-                print(f"  ! {result.error}")
+                print(f"Ошибка: {result.error}", flush=True)
                 print("Ошибка не останавливает сбор, перехожу к следующему акту.", flush=True)
-        else:
-            print(f"Ошибка: {result.error}", flush=True)
+
+            if max_acts and processed >= max_acts:
+                print(f"Достигнут лимит max_acts={max_acts}")
+                break
+
+            if result.status == "error":
+                back_to_list(list_win)
+            moved = advance_to_next_act(list_win, lang, result.act_title)
+        except Exception as exc:
+            print(f"Ошибка: {exc}", flush=True)
             print("Ошибка не останавливает сбор, перехожу к следующему акту.", flush=True)
-
-        if max_acts and processed >= max_acts:
-            print(f"Достигнут лимит max_acts={max_acts}")
-            break
-
-        if result.status == "error":
-            back_to_list(list_win)
-        if advance_to_next_act(list_win, lang, result.act_title):
+            moved = False
+            try:
+                back_to_list(list_win)
+                title = result.act_title if result is not None else ""
+                moved = bool(advance_to_next_act(list_win, lang, title))
+            except Exception as follow:
+                print(f"К следующему акту перейти не вышло: {follow}", flush=True)
+        if moved:
             missed_steps = 0
         else:
             missed_steps += 1
