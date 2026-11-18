@@ -169,7 +169,7 @@ namespace SborAktov
                 try { Process.Start(csv); } catch { }
                 return;
             }
-            Log("Сбор остановился. Чаще всего отчёт 1С закрыт или курсор стоит не на акте.");
+            Log("Сбор остановился. Причина — в строке «Ошибка» выше.");
         }
 
         private static void ExtractPayload(string root)
@@ -223,26 +223,55 @@ namespace SborAktov
             if (exe == null)
                 throw new InvalidOperationException("Чтение текста с экрана не установилось. Нажмите «Старт» ещё раз и согласитесь, если Windows спросит разрешение.");
 
-            string tessdata = Path.Combine(Path.GetDirectoryName(exe), "tessdata");
-            string rus = Path.Combine(tessdata, "rus.traineddata");
-            if (!File.Exists(rus))
+            string install = Path.Combine(Path.GetDirectoryName(exe), "tessdata");
+            string local = Path.Combine(root, "tessdata");
+            Directory.CreateDirectory(local);
+            foreach (string lang in new[] { "eng", "rus" })
             {
+                string name = lang + ".traineddata";
+                string dest = Path.Combine(local, name);
+                if (TraineddataReady(dest))
+                    continue;
+                string src = Path.Combine(install, name);
+                if (TraineddataReady(src))
+                {
+                    try
+                    {
+                        File.Copy(src, dest, true);
+                    }
+                    catch
+                    {
+                        // папка установки закрыта для чтения — скачаем ниже
+                    }
+                }
+                if (TraineddataReady(dest))
+                    continue;
+                Log("Скачиваю язык " + lang + "...");
                 try
                 {
-                    Directory.CreateDirectory(tessdata);
-                    Log("Скачиваю русский язык...");
-                    Download("https://github.com/tesseract-ocr/tessdata_fast/raw/main/rus.traineddata", rus);
+                    Download("https://github.com/tesseract-ocr/tessdata_fast/raw/main/" + name, dest);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    string local = Path.Combine(root, "tessdata");
-                    Directory.CreateDirectory(local);
-                    Log("Скачиваю языки в папку программы...");
-                    Download("https://github.com/tesseract-ocr/tessdata_fast/raw/main/rus.traineddata", Path.Combine(local, "rus.traineddata"));
-                    Download("https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata", Path.Combine(local, "eng.traineddata"));
+                    throw new InvalidOperationException(
+                        "Не скачался файл языка " + lang + ". Проверьте интернет и нажмите «Старт» ещё раз. " + ex.Message);
                 }
+                if (!TraineddataReady(dest))
+                    throw new InvalidOperationException("Файл языка " + lang + " скачался пустым. Нажмите «Старт» ещё раз.");
             }
             return exe;
+        }
+
+        private static bool TraineddataReady(string path)
+        {
+            try
+            {
+                return File.Exists(path) && new FileInfo(path).Length > 500000;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static string FindPython()
@@ -350,10 +379,12 @@ namespace SborAktov
             psi.EnvironmentVariables["PYTHONUTF8"] = "1";
             if (!string.IsNullOrEmpty(tesseract))
             {
-                string tessdata = Path.Combine(Path.GetDirectoryName(tesseract), "tessdata");
-                string local = Path.Combine(workdir, "tessdata", "rus.traineddata");
-                if (!File.Exists(Path.Combine(tessdata, "rus.traineddata")) && File.Exists(local))
-                    psi.EnvironmentVariables["TESSDATA_PREFIX"] = workdir + "\\";
+                // Сборка Tesseract для Windows ищет eng.traineddata прямо в папке
+                // из TESSDATA_PREFIX, если путь заканчивается на «\».
+                string prefix = Path.Combine(workdir, "tessdata");
+                if (!prefix.EndsWith("\\"))
+                    prefix += "\\";
+                psi.EnvironmentVariables["TESSDATA_PREFIX"] = prefix;
             }
             using (Process process = new Process())
             {

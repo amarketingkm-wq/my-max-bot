@@ -15,6 +15,22 @@ PHONE_RE = re.compile(
 SUM_RE = re.compile(r"\d{1,3}(?:[ \u00A0]\d{3})*(?:[.,]\d{2})?|\d+(?:[.,]\d{2})?")
 
 
+def _ocr(call, lang: str):
+    """eng+rus, затем каждый язык отдельно. Наружу уходит первая ошибка."""
+    order = []
+    for attempt in (lang, "rus", "eng"):
+        if attempt and attempt not in order:
+            order.append(attempt)
+    first = None
+    for attempt in order:
+        try:
+            return call(attempt)
+        except Exception as exc:
+            if first is None:
+                first = exc
+    raise first
+
+
 def configure_tesseract(cmd: str = "") -> None:
     if cmd:
         pytesseract.pytesseract.tesseract_cmd = cmd
@@ -40,11 +56,7 @@ def read_text(image: Image.Image, lang: str = "eng+rus", whitelist: str = "") ->
     if whitelist:
         cfg += f" -c tessedit_char_whitelist={whitelist}"
     prepared = preprocess_for_ocr(image)
-    try:
-        return pytesseract.image_to_string(prepared, lang=lang, config=cfg) or ""
-    except Exception:
-        # fallback without rus traineddata
-        return pytesseract.image_to_string(prepared, lang="eng", config=cfg) or ""
+    return _ocr(lambda attempt: pytesseract.image_to_string(prepared, lang=attempt, config=cfg) or "", lang)
 
 
 def normalize_phone(raw: str) -> Optional[str]:
@@ -113,14 +125,12 @@ def find_label_box(
 ) -> Optional[tuple[int, int, int, int]]:
     """OCR word boxes and find a box whose text contains label fragments."""
     prepared = preprocess_for_ocr(image, scale=1.5)
-    try:
-        data = pytesseract.image_to_data(
-            prepared, lang=lang, output_type=pytesseract.Output.DICT
-        )
-    except Exception:
-        data = pytesseract.image_to_data(
-            prepared, lang="eng", output_type=pytesseract.Output.DICT
-        )
+    data = _ocr(
+        lambda attempt: pytesseract.image_to_data(
+            prepared, lang=attempt, output_type=pytesseract.Output.DICT
+        ),
+        lang,
+    )
 
     scale = 1.5
     words = []
