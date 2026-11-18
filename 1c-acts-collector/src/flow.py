@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -495,6 +496,7 @@ def process_one_act(
     cfg: dict,
     list_win: w.WindowInfo,
     pause: PauseController,
+    done: Optional[set[str]] = None,
 ) -> ActResult:
     delays = cfg["delays"]
     lang = cfg["ocr"].get("lang", "eng+rus")
@@ -505,6 +507,20 @@ def process_one_act(
     pause.wait_if_paused()
     if pause.stop:
         return ActResult("", "", "", status="stopped", collected_at=_now())
+
+    list_name = ensure_act_row(list_win, lang)
+    if not list_name:
+        return ActResult(
+            act_title="",
+            amount="",
+            phone="",
+            status="error",
+            error="В списке нет строки, которая начинается с «Акт».",
+            collected_at=_now(),
+        )
+    if done and list_name in done:
+        return ActResult(list_name, "", "", status="skip", collected_at=_now())
+    print(f"Беру номер для: {list_name}", flush=True)
 
     before_act = snapshot_hwnds()
     w.brief_focus(list_win.hwnd)
@@ -524,7 +540,7 @@ def process_one_act(
             act = same_window(list_win, read_heading(act_img, lang) or "Акт оценки")
     if act is None:
         return ActResult(
-            act_title="(не открылся)",
+            act_title=list_name or "(не открылся)",
             amount="",
             phone="",
             status="error",
@@ -560,7 +576,7 @@ def process_one_act(
         save_debug(act_img, "act_no_ticket")
         close_opened_forms([act], list_win.hwnd, delays["after_close"])
         return ActResult(
-            act_title=act.title,
+            act_title=list_name,
             amount=amount,
             phone="",
             status="error",
@@ -587,7 +603,7 @@ def process_one_act(
         save_debug(ticket_img, "ticket_no_client")
         close_opened_forms([ticket, act], list_win.hwnd, delays["after_close"])
         return ActResult(
-            act_title=act.title,
+            act_title=list_name,
             amount=amount,
             phone="",
             ticket_title=ticket.title,
@@ -606,7 +622,7 @@ def process_one_act(
         save_debug(client_img, "client_no_reveal")
         close_opened_forms([client, ticket, act], list_win.hwnd, delays["after_close"])
         return ActResult(
-            act_title=act.title,
+            act_title=list_name,
             amount=amount,
             phone="",
             ticket_title=ticket.title,
@@ -642,7 +658,7 @@ def process_one_act(
     status = "ok" if phone else "partial"
     err = "" if phone else "Сумма собрана, телефон не распознан OCR"
     return ActResult(
-        act_title=act.title,
+        act_title=list_name,
         amount=amount,
         phone=phone or "",
         ticket_title=ticket.title,
@@ -663,10 +679,101 @@ def save_debug(img: Image.Image, name: str) -> None:
     img.save(folder / f"{stamp}_{name}.png")
 
 
-def move_to_next_row(list_win: w.WindowInfo) -> None:
-    w.brief_focus(list_win.hwnd)
-    time.sleep(0.1)
-    w.press_down(list_win.hwnd)
+def act_name_from_text(text: str) -> str:
+    """Название акта — фрагмент, который начинается со слова «акт»."""
+    for chunk in re.split(r"[\t\r\n]+", text or ""):
+        clean = " ".join(chunk.split())
+        if clean.casefold().startswith("акт"):
+            return clean[:180]
+    return ""
+
+
+def selection_band(img: Image.Image) -> Optional[tuple[int, int]]:
+    """Жёлтая рамка текущей строки табличного документа: верх и низ."""
+    rgb = np.array(img.convert("RGB"))
+    red = rgb[:, :, 0].astype(int)
+    green = rgb[:, :, 1].astype(int)
+    blue = rgb[:, :, 2].astype(int)
+    yellow = (red > 230) & (green > 170) & (blue < 140) & (red > blue + 70)
+    lines: list[int] = []
+    width = yellow.shape[1]
+    for y, row in enumerate(yellow):
+        run = longest = 0
+        for on in row:
+            run = run + 1 if on else 0
+            if run > longest:
+                longest = run
+        if longest > width * 0.35:
+            lines.append(y)
+    if len(lines) < 2:
+        return None
+    clusters: list[tuple[int, int]] = []
+    start = prev = lines[0]
+    for y in lines[1:]:
+        if y - prev > 2:
+            clusters.append((start, prev))
+            start = y
+        prev = y
+    clusters.append((start, prev))
+    for index in range(len(clusters) - 1):
+        top = clusters[index]
+        bottom = clusters[index + 1]
+        gap = bottom[0] - top[1]
+        if 8 <= gap <= 48:
+            return top[1] + 1, bottom[0]
+    return None
+
+
+def row_act_name(list_win: w.WindowInfo, lang: str) -> str:
+    """Название из текущей строки списка: сначала копирование ячейки, затем жёлтая рамка."""
+    copied = act_name_from_text(w.copy_active_cell(list_win.hwnd))
+    if copied:
+        return copied
+    img = w.screenshot_window(list_win.hwnd)
+    band = selection_band(img)
+    if band is None:
+        return ""
+    y0, y1 = band
+    strip = img.crop((20, y0, max(21, int(img.width * 0.55)), max(y0 + 1, y1)))
+    return act_name_from_text(ocr.read_text(strip, lang=lang))
+
+
+def ensure_act_row(list_win: w.WindowInfo, lang: str) -> str:
+    name = row_act_name(list_win, lang)
+    if name:
+        print(f"Акт в списке: {name}", flush=True)
+        return name
+    print("Строка не начинается с «Акт». Спускаюсь вниз.", flush=True)
+    return advance_to_next_act(list_win, lang, previous="")
+
+
+def advance_to_next_act(list_win: w.WindowInfo, lang: str, previous: str) -> str:
+    """Вниз, пока текущая строка снова не начнётся со слова «Акт»."""
+    print("Ищу строку, которая начинается с «Акт».", flush=True)
+    stuck = 0
+    last = previous
+    for _ in range(30):
+        w.brief_focus(list_win.hwnd)
+        w.press_down(list_win.hwnd)
+        time.sleep(0.25)
+        name = row_act_name(list_win, lang)
+        if name and name != previous:
+            print(f"Следующий акт: {name}", flush=True)
+            return name
+        if not name:
+            stuck = 0
+            last = ""
+            continue
+        if name == last:
+            stuck += 1
+            if stuck >= 2:
+                print("Строки актов закончились.", flush=True)
+                return ""
+        else:
+            stuck = 0
+        last = name
+    print("Не нашёл следующую строку, которая начинается с «Акт».", flush=True)
+    return ""
 
 
 def run(cfg: dict, pause: PauseController) -> None:
@@ -698,21 +805,14 @@ def run(cfg: dict, pause: PauseController) -> None:
         if pause.stop:
             break
 
-        result = process_one_act(cfg, list_win, pause)
+        result = process_one_act(cfg, list_win, pause, done)
         if pause.stop or result.status == "stopped":
             break
+        lang = cfg["ocr"].get("lang", "eng+rus")
 
-        if result.act_title in done and result.status == "ok":
+        if result.status == "skip":
             print(f"Пропуск (уже было): {result.act_title}")
-            move_to_next_row(list_win)
-            time.sleep(cfg["delays"]["between_acts"])
-            empty_streak += 1
-            if empty_streak >= 5:
-                print("Похоже, новые акты закончились.")
-                break
-            continue
-
-        if result.act_title and result.act_title != "(не открылся)":
+        elif result.act_title and result.act_title != "(не открылся)":
             append_result(csv_path, log_path, result)
             done.add(result.act_title)
             processed += 1
@@ -735,7 +835,10 @@ def run(cfg: dict, pause: PauseController) -> None:
             print(f"Достигнут лимит max_acts={max_acts}")
             break
 
-        move_to_next_row(list_win)
+        if not result.act_title and result.status == "error":
+            break
+        if not advance_to_next_act(list_win, lang, result.act_title):
+            break
         time.sleep(cfg["delays"]["between_acts"])
 
     print(f"Готово. CSV: {csv_path}")

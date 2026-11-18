@@ -9,6 +9,7 @@ from PIL import Image
 
 try:
     import win32api
+    import win32clipboard
     import win32con
     import win32gui
     import win32process
@@ -222,6 +223,52 @@ def press_escape(hwnd: int) -> None:
 
 def press_down(hwnd: int) -> None:
     send_keys(hwnd, win32con.VK_DOWN)
+
+
+def _clipboard_get() -> str:
+    try:
+        win32clipboard.OpenClipboard()
+    except Exception:
+        return ""
+    try:
+        if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+            return ""
+        data = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+        return data or ""
+    except Exception:
+        return ""
+    finally:
+        try:
+            win32clipboard.CloseClipboard()
+        except Exception:
+            pass
+
+
+def _clipboard_set(text: str) -> None:
+    win32clipboard.OpenClipboard()
+    try:
+        win32clipboard.EmptyClipboard()
+        if text:
+            win32clipboard.SetClipboardText(text, win32con.CF_UNICODETEXT)
+    finally:
+        win32clipboard.CloseClipboard()
+
+
+def copy_active_cell(hwnd: int) -> str:
+    """Ctrl+C текущей ячейки списка. Прежнее содержимое буфера возвращается назад."""
+    previous = _clipboard_get()
+    try:
+        _clipboard_set("")
+    except Exception:
+        return ""
+    send_keys(hwnd, win32con.VK_CONTROL, 0x43)
+    time.sleep(0.35)
+    copied = _clipboard_get()
+    try:
+        _clipboard_set(previous)
+    except Exception:
+        pass
+    return copied or ""
 
 
 def press_enter(hwnd: int) -> None:
