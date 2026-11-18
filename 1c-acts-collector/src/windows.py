@@ -67,6 +67,44 @@ def find_window(substr: str) -> Optional[WindowInfo]:
     return max(wins, key=lambda w: w.width * w.height)
 
 
+# В такси-интерфейсе отчёт — вкладка. Заголовок окна Windows при этом
+# «… / Управление торговлей … (1С:Предприятие)», а не имя отчёта.
+ONE_C_TITLE_HINTS = (
+    "1С:Предприятие",
+    "1C:Предприятие",
+    "1C:Enterprise",
+    "Управление торговлей",
+)
+
+
+def find_1c_window(extra: str = "") -> Optional[WindowInfo]:
+    needles: list[str] = []
+    if extra:
+        needles.append(extra)
+    needles.extend(ONE_C_TITLE_HINTS)
+    seen: set[str] = set()
+    for needle in needles:
+        key = needle.casefold()
+        if not needle or key in seen:
+            continue
+        seen.add(key)
+        win = find_window(needle)
+        if win and win.width >= 400 and win.height >= 300:
+            return win
+    return None
+
+
+def describe_windows(limit: int = 20) -> str:
+    lines: list[str] = []
+    for win in _enum_windows():
+        if win.width < 200 or win.height < 120:
+            continue
+        lines.append(f"- {win.title}")
+        if len(lines) >= limit:
+            break
+    return "\n".join(lines) if lines else "(нет видимых окон)"
+
+
 def find_window_title_startswith(prefix: str) -> Optional[WindowInfo]:
     needle = prefix.lower()
     wins = [w for w in _enum_windows() if w.title.lower().startswith(needle)]

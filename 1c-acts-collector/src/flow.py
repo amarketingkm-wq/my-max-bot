@@ -230,6 +230,36 @@ def click_reveal_phone(
     return True
 
 
+def read_heading(img: Image.Image, lang: str) -> str:
+    """Имя формы из верхней части окна, когда 1С не меняет заголовок Windows."""
+    top = img.crop((0, 0, img.width, min(img.height, 240)))
+    text = ocr.read_text(top, lang=lang)
+    for line in text.splitlines():
+        clean = " ".join(line.split())
+        if "акт оценки" in clean.casefold() or "залоговый билет" in clean.casefold():
+            return clean[:180]
+    return ""
+
+
+def same_window(win: w.WindowInfo, title: str) -> w.WindowInfo:
+    return w.WindowInfo(hwnd=win.hwnd, title=title or win.title, rect=win.rect)
+
+
+def close_opened_forms(
+    forms: list[Optional[w.WindowInfo]],
+    main_hwnd: int,
+    delay: float,
+) -> None:
+    for item in forms:
+        if item is None:
+            continue
+        if item.hwnd == main_hwnd:
+            w.close_window(item.hwnd)
+            time.sleep(delay)
+        else:
+            safe_close(item, delay=delay)
+
+
 def read_amount_from_act(img: Image.Image, sum_label: str, lang: str) -> str:
     region = region_right_of_label(img, sum_label, width=280, height=48, lang=lang)
     if region is None:
@@ -297,13 +327,18 @@ def process_one_act(
     time.sleep(0.1)
     w.press_enter(list_win.hwnd)
 
-    act = w.wait_for_window(act_prefix, timeout=10)
+    act = w.wait_for_window(act_prefix, timeout=2.5)
     if not act:
-        w.press_enter(list_win.hwnd)
-        act = w.wait_for_window(act_prefix, timeout=6)
-    if not act:
-        act = wait_new_window(before_act, timeout=3, exclude_substrings=[list_sub])
-    if not act or act_prefix.lower() not in act.title.lower():
+        opened = wait_new_window(before_act, timeout=1.5, exclude_substrings=[list_sub])
+        if opened and act_prefix.lower() in opened.title.lower():
+            act = opened
+    act_img = None
+    if act is None:
+        time.sleep(delays["after_open"])
+        act_img = w.screenshot_window(list_win.hwnd)
+        if ocr.find_label_box(act_img, cfg["sum_label"], lang=lang):
+            act = same_window(list_win, read_heading(act_img, lang) or "Акт оценки")
+    if act is None:
         return ActResult(
             act_title="(не открылся)",
             amount="",
@@ -313,10 +348,15 @@ def process_one_act(
             collected_at=_now(),
         )
 
-    time.sleep(delays["after_open"])
+    time.sleep(0.2 if act.hwnd == list_win.hwnd else delays["after_open"])
     pause.wait_if_paused()
 
-    act_img = w.screenshot_window(act.hwnd)
+    if act_img is None or act.hwnd != list_win.hwnd:
+        act_img = w.screenshot_window(act.hwnd)
+    if act_prefix.lower() not in act.title.lower():
+        heading = read_heading(act_img, lang)
+        if heading:
+            act = same_window(act, heading)
     amount = read_amount_from_act(act_img, cfg["sum_label"], lang)
 
     # Focus «Залоговый билет» and open (кнопка / Ctrl+Shift+F4)
@@ -324,14 +364,18 @@ def process_one_act(
     click_field_value(act.hwnd, act_img, cfg["ticket_field_label"], dx=140, lang=lang)
     time.sleep(0.2)
     w.open_reference(act.hwnd)
-    ticket = w.wait_for_window(ticket_prefix, timeout=8)
+    ticket = w.wait_for_window(ticket_prefix, timeout=2.5)
     if not ticket:
-        # retry via open-button heuristic
         click_open_reference_button(act.hwnd, act_img, cfg["ticket_field_label"], lang=lang)
-        ticket = w.wait_for_window(ticket_prefix, timeout=8)
+        ticket = w.wait_for_window(ticket_prefix, timeout=2.5)
+    if not ticket:
+        time.sleep(delays["after_open"])
+        ticket_try = w.screenshot_window(act.hwnd)
+        if not ocr.find_label_box(ticket_try, cfg["sum_label"], lang=lang):
+            ticket = same_window(act, read_heading(ticket_try, lang) or ticket_prefix)
     if not ticket:
         save_debug(act_img, "act_no_ticket")
-        safe_close(act, delay=delays["after_close"])
+        close_opened_forms([act], list_win.hwnd, delays["after_close"])
         return ActResult(
             act_title=act.title,
             amount=amount,
@@ -351,19 +395,24 @@ def process_one_act(
     click_open_reference_button(ticket.hwnd, ticket_img, cfg["client_field_label"], lang=lang)
     client = wait_new_window(
         before_client,
-        timeout=4,
+        timeout=2.5,
         exclude_substrings=[list_sub, act_prefix, ticket_prefix],
     )
     if not client:
         w.open_reference(ticket.hwnd)
         client = wait_new_window(
             before_client,
-            timeout=8,
+            timeout=2.5,
             exclude_substrings=[list_sub, act_prefix, ticket_prefix],
         )
     if not client:
+        time.sleep(delays["after_open"])
+        client_try = w.screenshot_window(ticket.hwnd)
+        if ocr.find_label_box(client_try, cfg["phone_label"], lang=lang):
+            client = same_window(ticket, "Клиент")
+    if not client:
         save_debug(ticket_img, "ticket_no_client")
-        safe_close(ticket, act, delay=delays["after_close"])
+        close_opened_forms([ticket, act], list_win.hwnd, delays["after_close"])
         return ActResult(
             act_title=act.title,
             amount=amount,
@@ -380,7 +429,7 @@ def process_one_act(
     client_img = w.screenshot_window(client.hwnd)
     if not click_reveal_phone(client.hwnd, client_img, cfg["phone_label"], lang=lang):
         save_debug(client_img, "client_no_reveal")
-        safe_close(client, ticket, act, delay=delays["after_close"])
+        close_opened_forms([client, ticket, act], list_win.hwnd, delays["after_close"])
         return ActResult(
             act_title=act.title,
             amount=amount,
@@ -407,7 +456,7 @@ def process_one_act(
     if not phone:
         save_debug(client_img2, "phone_ocr_fail")
 
-    safe_close(client, ticket, act, delay=delays["after_close"])
+    close_opened_forms([client, ticket, act], list_win.hwnd, delays["after_close"])
 
     status = "ok" if phone else "partial"
     err = "" if phone else "Сумма собрана, телефон не распознан OCR"
@@ -444,11 +493,12 @@ def run(cfg: dict, pause: PauseController) -> None:
     csv_path, log_path = ensure_output(cfg)
     done = already_processed(log_path)
 
-    list_win = w.find_window(cfg["list_window_title_substr"])
+    list_win = w.find_1c_window(cfg.get("list_window_title_substr") or "")
     if not list_win:
         raise RuntimeError(
-            f'Не найдено окно «{cfg["list_window_title_substr"]}». '
-            "Откройте отчёт и поставьте курсор на первый нужный «Акт оценки …»."
+            "Не вижу окно 1С. Отчёт должен быть открыт и не свёрнут.\n"
+            "Окна, которые видит программа:\n"
+            + w.describe_windows()
         )
 
     print(f"Список: {list_win.title}")
