@@ -230,6 +230,36 @@ def press_find(hwnd: int) -> None:
     send_keys(hwnd, win32con.VK_CONTROL, 0x46)
 
 
+def send_to_focused(*vk_keys: int) -> None:
+    """Клавиши в то поле, которое уже открыл Ctrl+F. Окно заново не активируем."""
+    for vk in vk_keys:
+        win32api.keybd_event(vk, 0, 0, 0)
+    time.sleep(0.03)
+    for vk in reversed(vk_keys):
+        win32api.keybd_event(vk, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+
+def paste_focused(text: str) -> None:
+    """Вставить текст в уже активное поле поиска, не щёлкая и не переводя фокус."""
+    previous = _clipboard_get()
+    try:
+        _clipboard_set(text)
+    except Exception:
+        return
+    send_to_focused(win32con.VK_CONTROL, 0x41)
+    time.sleep(0.05)
+    send_to_focused(win32con.VK_CONTROL, 0x56)
+    time.sleep(0.2)
+    try:
+        _clipboard_set(previous)
+    except Exception:
+        pass
+
+
+def press_enter_focused() -> None:
+    send_to_focused(win32con.VK_RETURN)
+
+
 def paste_text(hwnd: int, text: str) -> None:
     """Выделить поле и вставить текст. Прежний буфер возвращается после вставки."""
     previous = _clipboard_get()
