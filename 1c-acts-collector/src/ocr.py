@@ -122,17 +122,21 @@ def find_label_box(
     image: Image.Image,
     label: str,
     lang: str = "eng+rus",
+    scale: float = 1.5,
 ) -> Optional[tuple[int, int, int, int]]:
     """OCR word boxes and find a box whose text contains label fragments."""
-    prepared = preprocess_for_ocr(image, scale=1.5)
+    words = word_boxes(image, lang=lang, scale=scale)
+    return box_for_label(words, label)
+
+
+def word_boxes(image: Image.Image, lang: str = "eng+rus", scale: float = 1.0) -> list[dict]:
+    prepared = preprocess_for_ocr(image, scale=scale)
     data = _ocr(
         lambda attempt: pytesseract.image_to_data(
-            prepared, lang=attempt, output_type=pytesseract.Output.DICT
+            prepared, lang=attempt, output_type=pytesseract.Output.DICT, config="--psm 6"
         ),
         lang,
     )
-
-    scale = 1.5
     words = []
     for i, txt in enumerate(data.get("text", [])):
         txt = (txt or "").strip()
@@ -147,13 +151,14 @@ def find_label_box(
                 "height": int(data["height"][i] / scale),
             }
         )
+    return words
 
+
+def box_for_label(words: list[dict], label: str) -> Optional[tuple[int, int, int, int]]:
     needle = re.sub(r"\s+", " ", label.lower()).strip(" :")
     parts = [p for p in re.split(r"\s+", needle) if len(p) > 2]
     if not parts:
         return None
-
-    # sliding window over OCR words
     for i in range(len(words)):
         chunk = []
         left = words[i]["left"]
@@ -161,13 +166,12 @@ def find_label_box(
         right = left + words[i]["width"]
         bottom = top + words[i]["height"]
         for j in range(i, min(i + max(6, len(parts) + 2), len(words))):
-            w = words[j]
-            # keep roughly same line
-            if abs(w["top"] - top) > 25:
+            word = words[j]
+            if abs(word["top"] - top) > 25:
                 break
-            chunk.append(w["text"].lower())
-            right = max(right, w["left"] + w["width"])
-            bottom = max(bottom, w["top"] + w["height"])
+            chunk.append(word["text"].lower())
+            right = max(right, word["left"] + word["width"])
+            bottom = max(bottom, word["top"] + word["height"])
             joined = " ".join(chunk)
             if all(p in joined for p in parts[: min(3, len(parts))]):
                 return left, top, right - left, bottom - top

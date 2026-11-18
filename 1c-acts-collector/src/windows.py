@@ -178,9 +178,16 @@ def click_window_relative(
     x: int,
     y: int,
     double: bool = False,
+    image_size: Optional[tuple[int, int]] = None,
 ) -> None:
-    left, top, _, _ = win32gui.GetWindowRect(hwnd)
-    click_screen(left + x, top + y, double=double, hwnd=hwnd)
+    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+    if image_size and image_size[0] and image_size[1]:
+        win_w = max(1, right - left)
+        win_h = max(1, bottom - top)
+        if image_size != (win_w, win_h):
+            x = int(round(x * win_w / image_size[0]))
+            y = int(round(y * win_h / image_size[1]))
+    click_screen(left + int(x), top + int(y), double=double, hwnd=hwnd)
 
 
 def send_keys(hwnd: int, *vk_keys: int) -> None:

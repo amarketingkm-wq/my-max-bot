@@ -141,7 +141,7 @@ def click_field_value(
     x, y, ww, hh = box
     cx = min(img.width - 40, x + ww + dx)
     cy = y + hh // 2
-    w.click_window_relative(hwnd, cx, cy)
+    w.click_window_relative(hwnd, cx, cy, image_size=img.size)
     return True
 
 
@@ -152,36 +152,85 @@ def row_icons(
     x1: int,
     y1: int,
 ) -> list[tuple[int, int]]:
-    """Центры маленьких кнопок на строке поля. Длинный текст пропускается."""
+    """Центры маленьких кнопок. Рамки полей и длинный текст не считаются кнопками."""
     x0, y0 = max(0, int(x0)), max(0, int(y0))
     x1, y1 = min(img.width, int(x1)), min(img.height, int(y1))
     if x1 - x0 < 8 or y1 - y0 < 8:
         return []
     rgb = np.array(img.crop((x0, y0, x1, y1)).convert("RGB"))
-    ink = rgb.min(axis=2) < 195
-    spans: list[tuple[int, int]] = []
-    start = None
-    for i, on in enumerate(ink.any(axis=0)):
-        if on and start is None:
-            start = i
-        elif not on and start is not None:
-            spans.append((start, i))
-            start = None
-    if start is not None:
-        spans.append((start, ink.shape[1]))
+    ink = rgb.min(axis=2) < 205
+    height, width = ink.shape
+    # Горизонтальная рамка поля идёт через всю строку и склеивает кнопку с текстом.
+    row_fill = ink.mean(axis=1)
+    ink[row_fill > 0.45] = False
+    col_fill = ink.mean(axis=0)
+    ink[:, col_fill > 0.55] = False
+    seen = np.zeros_like(ink, dtype=bool)
     centers: list[tuple[int, int]] = []
-    for left, right in spans:
-        width = right - left
-        if not 8 <= width <= 34:
+    ys, xs = np.where(ink)
+    for sy, sx in zip(ys.tolist(), xs.tolist()):
+        if seen[sy, sx]:
             continue
-        rows = np.where(ink[:, left:right].any(axis=1))[0]
-        if len(rows) == 0:
+        stack = [(sy, sx)]
+        seen[sy, sx] = True
+        minx = maxx = sx
+        miny = maxy = sy
+        count = 0
+        while stack:
+            cy, cx = stack.pop()
+            count += 1
+            minx, maxx = min(minx, cx), max(maxx, cx)
+            miny, maxy = min(miny, cy), max(maxy, cy)
+            for ny in (cy - 1, cy, cy + 1):
+                if ny < 0 or ny >= height:
+                    continue
+                for nx in (cx - 1, cx, cx + 1):
+                    if nx < 0 or nx >= width or seen[ny, nx] or not ink[ny, nx]:
+                        continue
+                    seen[ny, nx] = True
+                    stack.append((ny, nx))
+        bw, bh = maxx - minx + 1, maxy - miny + 1
+        if not (8 <= bw <= 32 and 8 <= bh <= 32):
             continue
-        height = int(rows[-1] - rows[0]) + 1
-        if not 8 <= height <= 32:
+        if count < 12:
             continue
-        centers.append((x0 + (left + right) // 2, y0 + int((rows[0] + rows[-1]) // 2)))
+        centers.append((x0 + (minx + maxx) // 2, y0 + (miny + maxy) // 2))
+    centers.sort(key=lambda p: p[0])
     return centers
+
+
+def click_header_open_button(hwnd: int, img: Image.Image) -> bool:
+    """Нижняя из маленьких кнопок у правого края шапки — открытие залогового билета."""
+    icons = row_icons(
+        img,
+        img.width - 140,
+        int(img.height * 0.18),
+        img.width - 3,
+        int(img.height * 0.40),
+    )
+    if not icons:
+        return False
+    cx, cy = max(icons, key=lambda point: point[1])
+    print(f"Кнопка у правого края: {cx}, {cy}", flush=True)
+    w.click_window_relative(hwnd, cx, cy, image_size=img.size)
+    return True
+
+
+def click_edge_button(hwnd: int, img: Image.Image, y_center: int) -> bool:
+    """Квадратная кнопка открытия у правого края строки, не внутри текста поля."""
+    icons = row_icons(
+        img,
+        img.width - 130,
+        y_center - 22,
+        img.width - 3,
+        y_center + 22,
+    )
+    if not icons:
+        return False
+    cx, cy = max(icons, key=lambda point: point[0])
+    print(f"Кнопка у правого края: {cx}, {cy}", flush=True)
+    w.click_window_relative(hwnd, cx, cy, image_size=img.size)
+    return True
 
 
 def click_open_reference_button(
@@ -217,13 +266,13 @@ def click_open_reference_button(
             mx, my, mw, mh = match
             cx = band_left + mx + mw // 2
             cy = max(0, y - 12) + my + mh // 2
-            w.click_window_relative(hwnd, cx, cy)
+            w.click_window_relative(hwnd, cx, cy, image_size=img.size)
             return True
 
     # Heuristic: open-button cluster near right side of field row
     cx = min(img.width - 28, x + ww + 520)
     cy = y + hh // 2
-    w.click_window_relative(hwnd, cx, cy)
+    w.click_window_relative(hwnd, cx, cy, image_size=img.size)
     return True
 
 
@@ -257,7 +306,7 @@ def click_reveal_phone(
             mx, my, mw, mh = match
             cx = origin_x + mx + mw // 2
             cy = origin_y + my + mh // 2
-            w.click_window_relative(hwnd, cx, cy)
+            w.click_window_relative(hwnd, cx, cy, image_size=img.size)
             return True
 
     if not box:
@@ -266,7 +315,7 @@ def click_reveal_phone(
     # First icon after masked value (лупа), typically ~200-260px right of label end
     cx = min(img.width - 20, x + ww + 230)
     cy = y + hh // 2
-    w.click_window_relative(hwnd, cx, cy)
+    w.click_window_relative(hwnd, cx, cy, image_size=img.size)
     return True
 
 
@@ -301,9 +350,19 @@ def close_opened_forms(
 
 
 def read_amount_from_act(img: Image.Image, sum_label: str, lang: str) -> str:
-    region = region_right_of_label(img, sum_label, width=280, height=48, lang=lang)
-    if region is None:
-        region = img.crop((0, img.height // 3, img.width, img.height))
+    upper = img.crop((0, 0, img.width, max(80, int(img.height * 0.48))))
+    box = ocr.find_label_box(upper, sum_label, lang=lang, scale=1.0)
+    if box is None:
+        return ""
+    x, y, ww, hh = box
+    region = img.crop(
+        (
+            x + ww,
+            max(0, y - 6),
+            min(img.width, x + ww + 220),
+            min(img.height, y + max(hh, 16) + 8),
+        )
+    )
     return ocr.extract_sum(region, lang=lang) or ""
 
 
@@ -397,21 +456,21 @@ def process_one_act(
         heading = read_heading(act_img, lang)
         if heading:
             act = same_window(act, heading)
-    amount = read_amount_from_act(act_img, cfg["sum_label"], lang)
-    print(f"Акт: {act.title}. Сумма: {amount or '-'}")
-
-    print("Жму кнопку справа у «Залоговый билет»")
-    ticket_box = ocr.find_label_box(act_img, cfg["ticket_field_label"], lang=lang)
-    if ticket_box:
-        x, y, ww, hh = ticket_box
-        icons = row_icons(act_img, x + ww + 30, y - 10, act_img.width - 6, y + hh + 16)
-        if icons:
-            w.click_window_relative(act.hwnd, icons[-1][0], icons[-1][1])
-        else:
-            w.open_reference(act.hwnd)
-    else:
+    print(f"Акт открыт: {act.title}. Жму кнопку залогового билета.", flush=True)
+    clicked = click_header_open_button(act.hwnd, act_img)
+    if not clicked:
+        upper_h = max(80, int(act_img.height * 0.48))
+        upper = act_img.crop((0, 0, act_img.width, upper_h))
+        words = ocr.word_boxes(upper, lang=lang, scale=1.0)
+        ticket_box = ocr.box_for_label(words, cfg["ticket_field_label"])
+        if ticket_box:
+            _, y, _, hh = ticket_box
+            clicked = click_edge_button(act.hwnd, act_img, y + max(hh, 12) // 2)
+    if not clicked:
         w.open_reference(act.hwnd)
     ticket = w.wait_for_window(ticket_prefix, timeout=4)
+    amount = read_amount_from_act(act_img, cfg["sum_label"], lang) if ticket else ""
+    print(f"Сумма: {amount or '-'}", flush=True)
     if not ticket:
         save_debug(act_img, "act_no_ticket")
         close_opened_forms([act], list_win.hwnd, delays["after_close"])
@@ -436,7 +495,7 @@ def process_one_act(
         # Кнопка открытия стоит сразу за крестиком, до поля «Дата рождения».
         icons = row_icons(ticket_img, x + ww + 8, y - 8, x + ww + 520, y + hh + 16)
         if icons:
-            w.click_window_relative(ticket.hwnd, icons[-1][0], icons[-1][1])
+            w.click_window_relative(ticket.hwnd, icons[-1][0], icons[-1][1], image_size=ticket_img.size)
         else:
             w.open_reference(ticket.hwnd)
     else:
@@ -473,7 +532,7 @@ def process_one_act(
         icons = row_icons(client_img, x + ww + 20, y - 12, x + ww + 780, y + hh + 20)
         if icons:
             eye = icons[0]
-            w.click_window_relative(client.hwnd, eye[0], eye[1])
+            w.click_window_relative(client.hwnd, eye[0], eye[1], image_size=client_img.size)
     if eye is None and not click_reveal_phone(client.hwnd, client_img, cfg["phone_label"], lang=lang):
         save_debug(client_img, "client_no_reveal")
         close_opened_forms([client, ticket, act], list_win.hwnd, delays["after_close"])
