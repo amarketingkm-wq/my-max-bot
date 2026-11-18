@@ -729,19 +729,15 @@ def same_window(win: w.WindowInfo, title: str) -> w.WindowInfo:
     return w.WindowInfo(hwnd=win.hwnd, title=title or win.title, rect=win.rect)
 
 
-def close_opened_forms(
-    forms: list[Optional[w.WindowInfo]],
-    main_hwnd: int,
-    delay: float,
-) -> None:
-    for item in forms:
-        if item is None:
-            continue
-        if item.hwnd == main_hwnd:
-            w.close_window(item.hwnd)
-            time.sleep(delay)
-        else:
-            safe_close(item, delay=delay)
+def close_back_to_report(main_hwnd: int, steps: list[str], delay: float) -> None:
+    """Закрыть формы сверху вниз и только потом разрешить следующий поиск."""
+    pause = max(delay, 0.7)
+    for name in steps:
+        print(f"Закрываю {name}.", flush=True)
+        w.close_window(main_hwnd)
+        time.sleep(pause)
+    print("Отчёт снова открыт. Следующий поиск только после этого.", flush=True)
+    time.sleep(0.4)
 
 
 def read_amount_from_act(img: Image.Image, sum_label: str, lang: str) -> str:
@@ -966,7 +962,7 @@ def process_one_act(
     print(f"Сумма: {amount or '-'}", flush=True)
     if not ticket:
         save_debug(act_img, "act_no_ticket")
-        close_opened_forms([act], list_win.hwnd, delays["after_close"])
+        close_back_to_report(list_win.hwnd, ["акт оценки"], delays["after_close"])
         return ActResult(
             act_title=list_name,
             amount=amount,
@@ -984,7 +980,11 @@ def process_one_act(
     before_client = snapshot_hwnds()
     if not focus_client_field(ticket.hwnd, ticket_img):
         save_debug(ticket_img, "ticket_no_client_field")
-        close_opened_forms([ticket, act], list_win.hwnd, delays["after_close"])
+        close_back_to_report(
+            list_win.hwnd,
+            ["залоговый билет", "акт оценки"],
+            delays["after_close"],
+        )
         return ActResult(
             act_title=list_name,
             amount=amount,
@@ -1005,7 +1005,11 @@ def process_one_act(
         )
     if not client:
         save_debug(ticket_img, "ticket_no_client")
-        close_opened_forms([ticket, act], list_win.hwnd, delays["after_close"])
+        close_back_to_report(
+            list_win.hwnd,
+            ["залоговый билет", "акт оценки"],
+            delays["after_close"],
+        )
         return ActResult(
             act_title=list_name,
             amount=amount,
@@ -1033,7 +1037,11 @@ def process_one_act(
     eye = click_phone_magnifier(client.hwnd, client_img)
     if eye is None and not click_reveal_phone(client.hwnd, client_img, cfg["phone_label"], lang=lang):
         save_debug(client_img, "client_no_reveal")
-        close_opened_forms([client, ticket, act], list_win.hwnd, delays["after_close"])
+        close_back_to_report(
+            list_win.hwnd,
+            ["карточку клиента", "залоговый билет", "акт оценки"],
+            delays["after_close"],
+        )
         return ActResult(
             act_title=list_name,
             amount=amount,
@@ -1063,7 +1071,11 @@ def process_one_act(
         shown.save(folder / f"{safe}.png")
         print(f"Цифры не прочитаны, сохранён узкий фрагмент: {folder / (safe + '.png')}", flush=True)
 
-    close_opened_forms([client, ticket, act], list_win.hwnd, delays["after_close"])
+    close_back_to_report(
+        list_win.hwnd,
+        ["карточку клиента", "залоговый билет", "акт оценки"],
+        delays["after_close"],
+    )
 
     status = "ok" if phone else "partial"
     err = "" if phone else "Сумма собрана, телефон не распознан OCR"
