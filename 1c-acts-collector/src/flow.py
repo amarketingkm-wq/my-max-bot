@@ -6,6 +6,7 @@ import os
 import re
 import time
 import zipfile
+from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
 from dataclasses import dataclass
 from datetime import datetime
@@ -800,11 +801,133 @@ def safe_close(*wins: Optional[w.WindowInfo], delay: float = 0.5) -> None:
             pass
 
 
+def read_act_titles(path: Path) -> list[str]:
+    """Названия актов из первого столбца таблицы, в порядке строк."""
+    ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    titles: list[str] = []
+    seen: set[str] = set()
+    with zipfile.ZipFile(path) as book:
+        shared: list[str] = []
+        if "xl/sharedStrings.xml" in book.namelist():
+            root = ET.fromstring(book.read("xl/sharedStrings.xml"))
+            for item in root.findall("m:si", ns):
+                shared.append("".join(node.text or "" for node in item.findall(".//m:t", ns)))
+        sheet_name = "xl/worksheets/sheet1.xml"
+        if sheet_name not in book.namelist():
+            sheets = [name for name in book.namelist() if name.startswith("xl/worksheets/sheet")]
+            if not sheets:
+                return []
+            sheet_name = sheets[0]
+        root = ET.fromstring(book.read(sheet_name))
+        for row in root.findall("m:sheetData/m:row", ns):
+            for cell in row.findall("m:c", ns):
+                kind = cell.get("t") or ""
+                if kind == "inlineStr":
+                    value = "".join(node.text or "" for node in cell.findall(".//m:t", ns))
+                else:
+                    node = cell.find("m:v", ns)
+                    value = node.text if node is not None and node.text else ""
+                    if kind == "s" and value.isdigit():
+                        index = int(value)
+                        value = shared[index] if index < len(shared) else ""
+                clean = " ".join(value.split())
+                if not clean.casefold().startswith("акт") or clean in seen:
+                    continue
+                seen.add(clean)
+                titles.append(clean)
+    return titles
+
+
+def act_number(title: str) -> str:
+    match = re.search(r"[A-Za-zА-Яа-яЁё]{2,8}-\d{3,}", title or "")
+    return match.group(0) if match else ""
+
+
+def search_queries(title: str) -> list[str]:
+    """Сначала полное название, затем номер вида БТС-0008818."""
+    text = " ".join((title or "").split())
+    queries = [text] if text else []
+    number = act_number(text)
+    if number and number not in queries:
+        queries.append(number)
+    return queries
+
+
+def load_requested_acts(cfg: dict) -> list[str]:
+    name = cfg.get("act_list") or "список-актов.xlsx"
+    path = ROOT / name
+    if not path.exists():
+        return []
+    return read_act_titles(path)
+
+
+def _search_dialog() -> Optional[w.WindowInfo]:
+    dialogs = [
+        item
+        for item in w.find_windows("Поиск")
+        if "поиск" in item.title.casefold() and item.width < 900
+    ]
+    if not dialogs:
+        return None
+    return min(dialogs, key=lambda item: item.width * item.height)
+
+
+def _click_search_button(hwnd: int, lang: str) -> bool:
+    image = w.screenshot_window(hwnd)
+    words = ocr.word_boxes(image, lang=lang, scale=1.5)
+    buttons = [
+        word
+        for word in words
+        if word["text"].casefold().startswith(("иска", "найт"))
+    ]
+    if not buttons:
+        print("Кнопку «Искать» не вижу, жму Enter.", flush=True)
+        w.press_enter(hwnd)
+        return True
+    button = max(buttons, key=lambda word: word["top"])
+    cx = button["left"] + max(button["width"], 1) // 2
+    cy = button["top"] + max(button["height"], 1) // 2
+    print(f"Кнопка «Искать»: {cx}, {cy}", flush=True)
+    w.click_window_relative(hwnd, cx, cy, image_size=image.size)
+    return True
+
+
+def search_for_act(list_win: w.WindowInfo, title: str, lang: str) -> bool:
+    """Ctrl+F, вставить акт, нажать «Искать», дождаться выделения строки."""
+    number = act_number(title)
+    for query in search_queries(title):
+        print(f"Поиск: {query}", flush=True)
+        w.brief_focus(list_win.hwnd)
+        w.press_find(list_win.hwnd)
+        time.sleep(0.6)
+        dialog = _search_dialog() or list_win
+        w.paste_text(dialog.hwnd, query)
+        time.sleep(0.2)
+        _click_search_button(dialog.hwnd, lang)
+        time.sleep(0.7)
+        dialog = _search_dialog()
+        if dialog is not None:
+            w.press_escape(dialog.hwnd)
+            time.sleep(0.3)
+        found = row_act_name(list_win, lang)
+        if number and number.casefold() in found.casefold():
+            print(f"Строка найдена: {found}", flush=True)
+            return True
+        if found and found.casefold().startswith("акт") and query.casefold() in found.casefold():
+            print(f"Строка найдена: {found}", flush=True)
+            return True
+        print("Этот запрос строку не выделил.", flush=True)
+        w.press_escape(list_win.hwnd)
+        time.sleep(0.2)
+    return False
+
+
 def process_one_act(
     cfg: dict,
     list_win: w.WindowInfo,
     pause: PauseController,
     done: Optional[set[str]] = None,
+    expected: str = "",
 ) -> ActResult:
     delays = cfg["delays"]
     lang = cfg["ocr"].get("lang", "eng+rus")
@@ -816,7 +939,11 @@ def process_one_act(
     if pause.stop:
         return ActResult("", "", "", status="stopped", collected_at=_now())
 
-    list_name = ensure_act_row(list_win, lang)
+    if expected:
+        list_name = " ".join(expected.split())
+        print(f"Открываю найденный акт: {list_name}", flush=True)
+    else:
+        list_name = ensure_act_row(list_win, lang)
     if not list_name:
         return ActResult(
             act_title="",
@@ -828,7 +955,8 @@ def process_one_act(
         )
     if done and list_name in done:
         return ActResult(list_name, "", "", status="skip", collected_at=_now())
-    print(f"Беру номер для: {list_name}", flush=True)
+    if not expected:
+        print(f"Беру номер для: {list_name}", flush=True)
 
     before_act = snapshot_hwnds()
     w.brief_focus(list_win.hwnd)
@@ -1119,6 +1247,89 @@ def advance_to_next_act(list_win: w.WindowInfo, lang: str, previous: str) -> str
     return ""
 
 
+def remember_result(
+    csv_path: Path,
+    log_path: Path,
+    done: set[str],
+    result: ActResult,
+    processed: int,
+) -> int:
+    if result.status == "skip":
+        print(f"Пропуск (уже было): {result.act_title}", flush=True)
+        return processed
+    if not result.act_title or result.act_title == "(не открылся)":
+        print(f"Ошибка: {result.error}", flush=True)
+        print("Ошибка не останавливает сбор, перехожу к следующему акту.", flush=True)
+        return processed
+    append_result(csv_path, log_path, result)
+    if revealed_phone(result.phone):
+        done.add(result.act_title)
+    else:
+        done.discard(result.act_title)
+        print("Номер не собран, этот акт будет взят снова.", flush=True)
+    processed += 1
+    print(
+        f"[{processed}] {result.status}: {result.act_title} | "
+        f"сумма={result.amount or '-'} | тел={result.phone or '-'}",
+        flush=True,
+    )
+    if result.error:
+        print(f"  ! {result.error}", flush=True)
+        print("Ошибка не останавливает сбор, перехожу к следующему акту.", flush=True)
+    return processed
+
+
+def run_requested_list(
+    cfg: dict,
+    pause: PauseController,
+    list_win: w.WindowInfo,
+    csv_path: Path,
+    log_path: Path,
+    done: set[str],
+    titles: list[str],
+) -> None:
+    """Идёт по файлу: Ctrl+F, вставка акта, «Искать», затем обычный сбор номера."""
+    lang = cfg["ocr"].get("lang", "eng+rus")
+    print(f"Актов в файле: {len(titles)}. Листание вниз не используется.", flush=True)
+    processed = 0
+    for index, title in enumerate(titles, start=1):
+        pause.wait_if_paused()
+        if pause.stop:
+            break
+        print(f"Список {index}/{len(titles)}: {title}", flush=True)
+        if title in done:
+            print(f"Пропуск (уже было): {title}", flush=True)
+            continue
+        try:
+            if not search_for_act(list_win, title, lang):
+                processed = remember_result(
+                    csv_path,
+                    log_path,
+                    done,
+                    ActResult(
+                        act_title=title,
+                        amount="",
+                        phone="",
+                        status="error",
+                        error="Поиск не выделил этот акт",
+                        collected_at=_now(),
+                    ),
+                    processed,
+                )
+                continue
+            result = process_one_act(cfg, list_win, pause, done, expected=title)
+            if pause.stop or result.status == "stopped":
+                break
+            processed = remember_result(csv_path, log_path, done, result, processed)
+        except Exception as exc:
+            print(f"Ошибка: {exc}", flush=True)
+            print("Ошибка не останавливает сбор, перехожу к следующему акту.", flush=True)
+            try:
+                back_to_list(list_win)
+            except Exception:
+                pass
+
+
 def run(cfg: dict, pause: PauseController) -> None:
     ocr.configure_tesseract(cfg.get("ocr", {}).get("tesseract_cmd") or "")
     csv_path, log_path = ensure_output(cfg)
@@ -1138,6 +1349,15 @@ def run(cfg: dict, pause: PauseController) -> None:
         "Чтобы работать в других программах: держите 1С открытой и видимой "
         "на втором мониторе (не сворачивайте)."
     )
+
+    list_path = ROOT / (cfg.get("act_list") or "список-актов.xlsx")
+    titles = read_act_titles(list_path) if list_path.exists() else []
+    if not titles:
+        print(f"Не вижу список актов в файле {list_path}. Листание вниз не запускаю.", flush=True)
+        return
+    run_requested_list(cfg, pause, list_win, csv_path, log_path, done, titles)
+    print(f"Готово. Таблица: {csv_path.with_suffix('.xlsx')}")
+    return
 
     max_acts = int(cfg.get("max_acts") or 0)
     processed = 0

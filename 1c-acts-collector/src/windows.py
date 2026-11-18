@@ -225,6 +225,28 @@ def press_down(hwnd: int) -> None:
     send_keys(hwnd, win32con.VK_DOWN)
 
 
+def press_find(hwnd: int) -> None:
+    """Ctrl+F — открыть поиск в списке 1С."""
+    send_keys(hwnd, win32con.VK_CONTROL, 0x46)
+
+
+def paste_text(hwnd: int, text: str) -> None:
+    """Выделить поле и вставить текст. Прежний буфер возвращается после вставки."""
+    previous = _clipboard_get()
+    try:
+        _clipboard_set(text)
+    except Exception:
+        return
+    send_keys(hwnd, win32con.VK_CONTROL, 0x41)
+    time.sleep(0.05)
+    send_keys(hwnd, win32con.VK_CONTROL, 0x56)
+    time.sleep(0.15)
+    try:
+        _clipboard_set(previous)
+    except Exception:
+        pass
+
+
 def _clipboard_get() -> str:
     try:
         win32clipboard.OpenClipboard()
