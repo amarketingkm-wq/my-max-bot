@@ -1,0 +1,31 @@
+{
+  "list_window_title_substr": "Обращения клиентов",
+  "act_title_prefix": "Акт оценки",
+  "ticket_title_prefix": "Залоговый билет",
+  "client_title_hints": ["Клиент", "Контрагент", "Физическое лицо"],
+  "sum_label": "Общая сумма выдаваемая клиенту на руки",
+  "ticket_field_label": "Залоговый билет",
+  "client_field_label": "Клиент",
+  "phone_label": "Телефон +7",
+  "output_csv": "output/acts_phones.csv",
+  "processed_log": "output/processed.txt",
+  "max_acts": 0,
+  "delays": {
+    "after_open": 1.2,
+    "after_click": 0.45,
+    "after_reveal": 0.8,
+    "after_close": 0.5,
+    "between_acts": 0.6
+  },
+  "ocr": {
+    "tesseract_cmd": "",
+    "lang": "eng+rus",
+    "phone_whitelist": "0123456789+ ()-"
+  },
+  "hotkeys": {
+    "pause": "f8",
+    "stop": "f9"
+  },
+  "focus_mode": "brief",
+  "comment": "focus_mode=brief кратковременно активирует окно 1С на клик/горячую клавишу; keep_front держит 1С сверху (мешает другим приложениям)."
+}
