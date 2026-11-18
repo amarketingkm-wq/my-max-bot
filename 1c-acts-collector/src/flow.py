@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 from PIL import Image
 
 from . import ocr
@@ -142,6 +143,45 @@ def click_field_value(
     cy = y + hh // 2
     w.click_window_relative(hwnd, cx, cy)
     return True
+
+
+def row_icons(
+    img: Image.Image,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+) -> list[tuple[int, int]]:
+    """Центры маленьких кнопок на строке поля. Длинный текст пропускается."""
+    x0, y0 = max(0, int(x0)), max(0, int(y0))
+    x1, y1 = min(img.width, int(x1)), min(img.height, int(y1))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return []
+    rgb = np.array(img.crop((x0, y0, x1, y1)).convert("RGB"))
+    ink = rgb.min(axis=2) < 195
+    spans: list[tuple[int, int]] = []
+    start = None
+    for i, on in enumerate(ink.any(axis=0)):
+        if on and start is None:
+            start = i
+        elif not on and start is not None:
+            spans.append((start, i))
+            start = None
+    if start is not None:
+        spans.append((start, ink.shape[1]))
+    centers: list[tuple[int, int]] = []
+    for left, right in spans:
+        width = right - left
+        if not 8 <= width <= 34:
+            continue
+        rows = np.where(ink[:, left:right].any(axis=1))[0]
+        if len(rows) == 0:
+            continue
+        height = int(rows[-1] - rows[0]) + 1
+        if not 8 <= height <= 32:
+            continue
+        centers.append((x0 + (left + right) // 2, y0 + int((rows[0] + rows[-1]) // 2)))
+    return centers
 
 
 def click_open_reference_button(
@@ -358,21 +398,20 @@ def process_one_act(
         if heading:
             act = same_window(act, heading)
     amount = read_amount_from_act(act_img, cfg["sum_label"], lang)
+    print(f"Акт: {act.title}. Сумма: {amount or '-'}")
 
-    # Focus «Залоговый билет» and open (кнопка / Ctrl+Shift+F4)
-    before_ticket = snapshot_hwnds()
-    click_field_value(act.hwnd, act_img, cfg["ticket_field_label"], dx=140, lang=lang)
-    time.sleep(0.2)
-    w.open_reference(act.hwnd)
-    ticket = w.wait_for_window(ticket_prefix, timeout=2.5)
-    if not ticket:
-        click_open_reference_button(act.hwnd, act_img, cfg["ticket_field_label"], lang=lang)
-        ticket = w.wait_for_window(ticket_prefix, timeout=2.5)
-    if not ticket:
-        time.sleep(delays["after_open"])
-        ticket_try = w.screenshot_window(act.hwnd)
-        if not ocr.find_label_box(ticket_try, cfg["sum_label"], lang=lang):
-            ticket = same_window(act, read_heading(ticket_try, lang) or ticket_prefix)
+    print("Жму кнопку справа у «Залоговый билет»")
+    ticket_box = ocr.find_label_box(act_img, cfg["ticket_field_label"], lang=lang)
+    if ticket_box:
+        x, y, ww, hh = ticket_box
+        icons = row_icons(act_img, x + ww + 30, y - 10, act_img.width - 6, y + hh + 16)
+        if icons:
+            w.click_window_relative(act.hwnd, icons[-1][0], icons[-1][1])
+        else:
+            w.open_reference(act.hwnd)
+    else:
+        w.open_reference(act.hwnd)
+    ticket = w.wait_for_window(ticket_prefix, timeout=4)
     if not ticket:
         save_debug(act_img, "act_no_ticket")
         close_opened_forms([act], list_win.hwnd, delays["after_close"])
@@ -388,28 +427,27 @@ def process_one_act(
     time.sleep(delays["after_open"])
     pause.wait_if_paused()
 
+    print(f"Залоговый билет: {ticket.title}. Жму кнопку у клиента")
     ticket_img = w.screenshot_window(ticket.hwnd)
     before_client = snapshot_hwnds()
-    click_field_value(ticket.hwnd, ticket_img, cfg["client_field_label"], dx=100, lang=lang)
-    time.sleep(0.15)
-    click_open_reference_button(ticket.hwnd, ticket_img, cfg["client_field_label"], lang=lang)
-    client = wait_new_window(
-        before_client,
-        timeout=2.5,
-        exclude_substrings=[list_sub, act_prefix, ticket_prefix],
-    )
-    if not client:
+    client_box = ocr.find_label_box(ticket_img, cfg["client_field_label"], lang=lang)
+    if client_box:
+        x, y, ww, hh = client_box
+        # Кнопка открытия стоит сразу за крестиком, до поля «Дата рождения».
+        icons = row_icons(ticket_img, x + ww + 8, y - 8, x + ww + 520, y + hh + 16)
+        if icons:
+            w.click_window_relative(ticket.hwnd, icons[-1][0], icons[-1][1])
+        else:
+            w.open_reference(ticket.hwnd)
+    else:
         w.open_reference(ticket.hwnd)
+    client = w.wait_for_window("Карточка", timeout=4)
+    if not client:
         client = wait_new_window(
             before_client,
-            timeout=2.5,
+            timeout=2,
             exclude_substrings=[list_sub, act_prefix, ticket_prefix],
         )
-    if not client:
-        time.sleep(delays["after_open"])
-        client_try = w.screenshot_window(ticket.hwnd)
-        if ocr.find_label_box(client_try, cfg["phone_label"], lang=lang):
-            client = same_window(ticket, "Клиент")
     if not client:
         save_debug(ticket_img, "ticket_no_client")
         close_opened_forms([ticket, act], list_win.hwnd, delays["after_close"])
@@ -426,8 +464,17 @@ def process_one_act(
     time.sleep(delays["after_open"])
     pause.wait_if_paused()
 
+    print(f"Карточка: {client.title}. Жму глаз у телефона")
     client_img = w.screenshot_window(client.hwnd)
-    if not click_reveal_phone(client.hwnd, client_img, cfg["phone_label"], lang=lang):
+    phone_box = ocr.find_label_box(client_img, cfg["phone_label"], lang=lang)
+    eye = None
+    if phone_box:
+        x, y, ww, hh = phone_box
+        icons = row_icons(client_img, x + ww + 20, y - 12, x + ww + 780, y + hh + 20)
+        if icons:
+            eye = icons[0]
+            w.click_window_relative(client.hwnd, eye[0], eye[1])
+    if eye is None and not click_reveal_phone(client.hwnd, client_img, cfg["phone_label"], lang=lang):
         save_debug(client_img, "client_no_reveal")
         close_opened_forms([client, ticket, act], list_win.hwnd, delays["after_close"])
         return ActResult(
@@ -443,16 +490,22 @@ def process_one_act(
     time.sleep(delays["after_reveal"])
     client_img2 = w.screenshot_window(client.hwnd)
     phone = ""
-    region = region_right_of_label(
-        client_img2, cfg["phone_label"], width=300, height=42, lang=lang
-    )
-    if region is not None:
-        phone = ocr.extract_phone(region, lang=lang) or ""
-    if not phone:
-        strip = client_img2.crop(
-            (0, int(client_img2.height * 0.50), client_img2.width, client_img2.height)
+    if eye is not None:
+        shown = client_img2.crop(
+            (
+                max(0, eye[0] - 190),
+                max(0, eye[1] - 22),
+                max(0, eye[0] - 4),
+                min(client_img2.height, eye[1] + 22),
+            )
         )
-        phone = ocr.extract_phone(strip, lang=lang) or ""
+        phone = ocr.extract_phone(shown, lang=lang) or ""
+    if not phone:
+        region = region_right_of_label(
+            client_img2, cfg["phone_label"], width=300, height=42, lang=lang
+        )
+        if region is not None:
+            phone = ocr.extract_phone(region, lang=lang) or ""
     if not phone:
         save_debug(client_img2, "phone_ocr_fail")
 
