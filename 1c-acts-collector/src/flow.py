@@ -1,0 +1,510 @@
+from __future__ import annotations
+
+import csv
+import json
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from PIL import Image
+
+from . import ocr
+from . import windows as w
+
+
+ROOT = Path(__file__).resolve().parents[1]
+TEMPLATES = ROOT / "templates"
+
+
+@dataclass
+class ActResult:
+    act_title: str
+    amount: str
+    phone: str
+    ticket_title: str = ""
+    status: str = "ok"
+    error: str = ""
+    collected_at: str = ""
+
+
+class PauseController:
+    def __init__(self) -> None:
+        self.paused = False
+        self.stop = False
+
+    def wait_if_paused(self) -> None:
+        while self.paused and not self.stop:
+            time.sleep(0.2)
+
+
+def load_config(path: Path) -> dict:
+    with path.open(encoding="utf-8") as f:
+        return json.load(f)
+
+
+def ensure_output(cfg: dict) -> tuple[Path, Path]:
+    csv_path = ROOT / cfg["output_csv"]
+    log_path = ROOT / cfg["processed_log"]
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    if not csv_path.exists():
+        with csv_path.open("w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "collected_at",
+                    "act_title",
+                    "amount",
+                    "phone",
+                    "ticket_title",
+                    "status",
+                    "error",
+                ],
+            )
+            writer.writeheader()
+    log_path.touch(exist_ok=True)
+    return csv_path, log_path
+
+
+def already_processed(log_path: Path) -> set[str]:
+    return {
+        line.strip()
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    }
+
+
+def append_result(csv_path: Path, log_path: Path, result: ActResult) -> None:
+    with csv_path.open("a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "collected_at",
+                "act_title",
+                "amount",
+                "phone",
+                "ticket_title",
+                "status",
+                "error",
+            ],
+        )
+        writer.writerow(
+            {
+                "collected_at": result.collected_at,
+                "act_title": result.act_title,
+                "amount": result.amount,
+                "phone": result.phone,
+                "ticket_title": result.ticket_title,
+                "status": result.status,
+                "error": result.error,
+            }
+        )
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(result.act_title + "\n")
+
+
+def region_right_of_label(
+    img: Image.Image,
+    label: str,
+    width: int = 420,
+    height: int = 40,
+    lang: str = "eng+rus",
+) -> Optional[Image.Image]:
+    box = ocr.find_label_box(img, label, lang=lang)
+    if not box:
+        return None
+    x, y, ww, hh = box
+    rx = x + ww + 8
+    ry = max(0, y - 6)
+    return img.crop(
+        (
+            rx,
+            ry,
+            min(img.width, rx + width),
+            min(img.height, ry + max(height, hh + 12)),
+        )
+    )
+
+
+def click_field_value(
+    hwnd: int,
+    img: Image.Image,
+    label: str,
+    dx: int = 120,
+    lang: str = "eng+rus",
+) -> bool:
+    box = ocr.find_label_box(img, label, lang=lang)
+    if not box:
+        return False
+    x, y, ww, hh = box
+    cx = min(img.width - 40, x + ww + dx)
+    cy = y + hh // 2
+    w.click_window_relative(hwnd, cx, cy)
+    return True
+
+
+def click_open_reference_button(
+    hwnd: int,
+    img: Image.Image,
+    label: str,
+    lang: str = "eng+rus",
+) -> bool:
+    """Click the «две клеточки» open button to the right of a reference field."""
+    box = ocr.find_label_box(img, label, lang=lang)
+    if not box:
+        return False
+    x, y, ww, hh = box
+    band_left = x + ww
+    band = img.crop(
+        (
+            band_left,
+            max(0, y - 12),
+            min(img.width, x + ww + 750),
+            min(img.height, y + hh + 36),
+        )
+    )
+    for tpl_name in (
+        "btn_open_client_tight.png",
+        "btn_open_client_alt.png",
+        "btn_open_client_area.png",
+    ):
+        tpl_path = TEMPLATES / tpl_name
+        if not tpl_path.exists():
+            continue
+        match = ocr.find_template(band, Image.open(tpl_path), threshold=0.68)
+        if match:
+            mx, my, mw, mh = match
+            cx = band_left + mx + mw // 2
+            cy = max(0, y - 12) + my + mh // 2
+            w.click_window_relative(hwnd, cx, cy)
+            return True
+
+    # Heuristic: open-button cluster near right side of field row
+    cx = min(img.width - 28, x + ww + 520)
+    cy = y + hh // 2
+    w.click_window_relative(hwnd, cx, cy)
+    return True
+
+
+def click_reveal_phone(
+    hwnd: int,
+    img: Image.Image,
+    phone_label: str,
+    lang: str = "eng+rus",
+) -> bool:
+    box = ocr.find_label_box(img, phone_label, lang=lang)
+    tpl = TEMPLATES / "btn_reveal_phone.png"
+    search = img
+    origin_x = 0
+    origin_y = 0
+    if box:
+        x, y, ww, hh = box
+        origin_x = x
+        origin_y = max(0, y - 20)
+        search = img.crop(
+            (
+                x,
+                origin_y,
+                min(img.width, x + 750),
+                min(img.height, y + hh + 45),
+            )
+        )
+
+    if tpl.exists():
+        match = ocr.find_template(search, Image.open(tpl), threshold=0.70)
+        if match:
+            mx, my, mw, mh = match
+            cx = origin_x + mx + mw // 2
+            cy = origin_y + my + mh // 2
+            w.click_window_relative(hwnd, cx, cy)
+            return True
+
+    if not box:
+        return False
+    x, y, ww, hh = box
+    # First icon after masked value (лупа), typically ~200-260px right of label end
+    cx = min(img.width - 20, x + ww + 230)
+    cy = y + hh // 2
+    w.click_window_relative(hwnd, cx, cy)
+    return True
+
+
+def read_amount_from_act(img: Image.Image, sum_label: str, lang: str) -> str:
+    region = region_right_of_label(img, sum_label, width=280, height=48, lang=lang)
+    if region is None:
+        region = img.crop((0, img.height // 3, img.width, img.height))
+    return ocr.extract_sum(region, lang=lang) or ""
+
+
+def snapshot_hwnds() -> set[int]:
+    return {win.hwnd for win in w._enum_windows()}
+
+
+def wait_new_window(
+    before: set[int],
+    timeout: float = 10.0,
+    exclude_substrings: Optional[list[str]] = None,
+) -> Optional[w.WindowInfo]:
+    exclude_substrings = [s.lower() for s in (exclude_substrings or [])]
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for win in w._enum_windows():
+            if win.hwnd in before:
+                continue
+            title_l = win.title.lower()
+            if any(s in title_l for s in exclude_substrings):
+                continue
+            if win.width < 200 or win.height < 150:
+                continue
+            return win
+        time.sleep(0.25)
+    return None
+
+
+def safe_close(*wins: Optional[w.WindowInfo], delay: float = 0.5) -> None:
+    for item in wins:
+        if item is None:
+            continue
+        try:
+            if not w.wait_until_closed(item.hwnd, timeout=0.1):
+                w.close_window(item.hwnd)
+                time.sleep(delay)
+            if not w.wait_until_closed(item.hwnd, timeout=1.5):
+                w.press_escape(item.hwnd)
+                time.sleep(delay)
+        except Exception:
+            pass
+
+
+def process_one_act(
+    cfg: dict,
+    list_win: w.WindowInfo,
+    pause: PauseController,
+) -> ActResult:
+    delays = cfg["delays"]
+    lang = cfg["ocr"].get("lang", "eng+rus")
+    act_prefix = cfg["act_title_prefix"]
+    ticket_prefix = cfg["ticket_title_prefix"]
+    list_sub = cfg["list_window_title_substr"]
+
+    pause.wait_if_paused()
+    if pause.stop:
+        return ActResult("", "", "", status="stopped", collected_at=_now())
+
+    before_act = snapshot_hwnds()
+    w.brief_focus(list_win.hwnd)
+    time.sleep(0.1)
+    w.press_enter(list_win.hwnd)
+
+    act = w.wait_for_window(act_prefix, timeout=10)
+    if not act:
+        w.press_enter(list_win.hwnd)
+        act = w.wait_for_window(act_prefix, timeout=6)
+    if not act:
+        act = wait_new_window(before_act, timeout=3, exclude_substrings=[list_sub])
+    if not act or act_prefix.lower() not in act.title.lower():
+        return ActResult(
+            act_title="(не открылся)",
+            amount="",
+            phone="",
+            status="error",
+            error="Не удалось открыть Акт оценки. Курсор должен стоять на строке акта.",
+            collected_at=_now(),
+        )
+
+    time.sleep(delays["after_open"])
+    pause.wait_if_paused()
+
+    act_img = w.screenshot_window(act.hwnd)
+    amount = read_amount_from_act(act_img, cfg["sum_label"], lang)
+
+    # Focus «Залоговый билет» and open (кнопка / Ctrl+Shift+F4)
+    before_ticket = snapshot_hwnds()
+    click_field_value(act.hwnd, act_img, cfg["ticket_field_label"], dx=140, lang=lang)
+    time.sleep(0.2)
+    w.open_reference(act.hwnd)
+    ticket = w.wait_for_window(ticket_prefix, timeout=8)
+    if not ticket:
+        # retry via open-button heuristic
+        click_open_reference_button(act.hwnd, act_img, cfg["ticket_field_label"], lang=lang)
+        ticket = w.wait_for_window(ticket_prefix, timeout=8)
+    if not ticket:
+        save_debug(act_img, "act_no_ticket")
+        safe_close(act, delay=delays["after_close"])
+        return ActResult(
+            act_title=act.title,
+            amount=amount,
+            phone="",
+            status="error",
+            error="Не удалось открыть Залоговый билет",
+            collected_at=_now(),
+        )
+
+    time.sleep(delays["after_open"])
+    pause.wait_if_paused()
+
+    ticket_img = w.screenshot_window(ticket.hwnd)
+    before_client = snapshot_hwnds()
+    click_field_value(ticket.hwnd, ticket_img, cfg["client_field_label"], dx=100, lang=lang)
+    time.sleep(0.15)
+    click_open_reference_button(ticket.hwnd, ticket_img, cfg["client_field_label"], lang=lang)
+    client = wait_new_window(
+        before_client,
+        timeout=4,
+        exclude_substrings=[list_sub, act_prefix, ticket_prefix],
+    )
+    if not client:
+        w.open_reference(ticket.hwnd)
+        client = wait_new_window(
+            before_client,
+            timeout=8,
+            exclude_substrings=[list_sub, act_prefix, ticket_prefix],
+        )
+    if not client:
+        save_debug(ticket_img, "ticket_no_client")
+        safe_close(ticket, act, delay=delays["after_close"])
+        return ActResult(
+            act_title=act.title,
+            amount=amount,
+            phone="",
+            ticket_title=ticket.title,
+            status="error",
+            error="Не удалось открыть карточку клиента",
+            collected_at=_now(),
+        )
+
+    time.sleep(delays["after_open"])
+    pause.wait_if_paused()
+
+    client_img = w.screenshot_window(client.hwnd)
+    if not click_reveal_phone(client.hwnd, client_img, cfg["phone_label"], lang=lang):
+        save_debug(client_img, "client_no_reveal")
+        safe_close(client, ticket, act, delay=delays["after_close"])
+        return ActResult(
+            act_title=act.title,
+            amount=amount,
+            phone="",
+            ticket_title=ticket.title,
+            status="error",
+            error="Не найдена кнопка показа телефона",
+            collected_at=_now(),
+        )
+
+    time.sleep(delays["after_reveal"])
+    client_img2 = w.screenshot_window(client.hwnd)
+    phone = ""
+    region = region_right_of_label(
+        client_img2, cfg["phone_label"], width=300, height=42, lang=lang
+    )
+    if region is not None:
+        phone = ocr.extract_phone(region, lang=lang) or ""
+    if not phone:
+        strip = client_img2.crop(
+            (0, int(client_img2.height * 0.50), client_img2.width, client_img2.height)
+        )
+        phone = ocr.extract_phone(strip, lang=lang) or ""
+    if not phone:
+        save_debug(client_img2, "phone_ocr_fail")
+
+    safe_close(client, ticket, act, delay=delays["after_close"])
+
+    status = "ok" if phone else "partial"
+    err = "" if phone else "Сумма собрана, телефон не распознан OCR"
+    return ActResult(
+        act_title=act.title,
+        amount=amount,
+        phone=phone or "",
+        ticket_title=ticket.title,
+        status=status,
+        error=err,
+        collected_at=_now(),
+    )
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def save_debug(img: Image.Image, name: str) -> None:
+    folder = ROOT / "output" / "debug"
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%H%M%S")
+    img.save(folder / f"{stamp}_{name}.png")
+
+
+def move_to_next_row(list_win: w.WindowInfo) -> None:
+    w.brief_focus(list_win.hwnd)
+    time.sleep(0.1)
+    w.press_down(list_win.hwnd)
+
+
+def run(cfg: dict, pause: PauseController) -> None:
+    ocr.configure_tesseract(cfg.get("ocr", {}).get("tesseract_cmd") or "")
+    csv_path, log_path = ensure_output(cfg)
+    done = already_processed(log_path)
+
+    list_win = w.find_window(cfg["list_window_title_substr"])
+    if not list_win:
+        raise RuntimeError(
+            f'Не найдено окно «{cfg["list_window_title_substr"]}». '
+            "Откройте отчёт и поставьте курсор на первый нужный «Акт оценки …»."
+        )
+
+    print(f"Список: {list_win.title}")
+    print("F8 — пауза/продолжить, F9 — стоп")
+    print(
+        "Чтобы работать в других программах: держите 1С открытой и видимой "
+        "на втором мониторе (не сворачивайте)."
+    )
+
+    max_acts = int(cfg.get("max_acts") or 0)
+    processed = 0
+    empty_streak = 0
+
+    while not pause.stop:
+        pause.wait_if_paused()
+        if pause.stop:
+            break
+
+        result = process_one_act(cfg, list_win, pause)
+        if pause.stop or result.status == "stopped":
+            break
+
+        if result.act_title in done and result.status == "ok":
+            print(f"Пропуск (уже было): {result.act_title}")
+            move_to_next_row(list_win)
+            time.sleep(cfg["delays"]["between_acts"])
+            empty_streak += 1
+            if empty_streak >= 5:
+                print("Похоже, новые акты закончились.")
+                break
+            continue
+
+        if result.act_title and result.act_title != "(не открылся)":
+            append_result(csv_path, log_path, result)
+            done.add(result.act_title)
+            processed += 1
+            empty_streak = 0 if result.status in ("ok", "partial") else empty_streak + 1
+            print(
+                f"[{processed}] {result.status}: {result.act_title} | "
+                f"сумма={result.amount or '-'} | тел={result.phone or '-'}"
+            )
+            if result.error:
+                print(f"  ! {result.error}")
+        else:
+            empty_streak += 1
+            print(f"Ошибка: {result.error}")
+
+        if empty_streak >= 5:
+            print("Слишком много ошибок подряд — остановка.")
+            break
+
+        if max_acts and processed >= max_acts:
+            print(f"Достигнут лимит max_acts={max_acts}")
+            break
+
+        move_to_next_row(list_win)
+        time.sleep(cfg["delays"]["between_acts"])
+
+    print(f"Готово. CSV: {csv_path}")
