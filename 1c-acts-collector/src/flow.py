@@ -4,6 +4,8 @@ import csv
 import json
 import re
 import time
+import zipfile
+from xml.sax.saxutils import escape as xml_escape
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -46,25 +48,25 @@ def load_config(path: Path) -> dict:
         return json.load(f)
 
 
+TABLE_COLUMNS = [
+    "Акт",
+    "Номер",
+    "Дата",
+    "Сумма на руки",
+    "Телефон",
+    "Залоговый билет",
+    "Примечание",
+    "Собрано",
+]
+
+
 def ensure_output(cfg: dict) -> tuple[Path, Path]:
     csv_path = ROOT / cfg["output_csv"]
     log_path = ROOT / cfg["processed_log"]
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     if not csv_path.exists():
         with csv_path.open("w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=[
-                    "collected_at",
-                    "act_title",
-                    "amount",
-                    "phone",
-                    "ticket_title",
-                    "status",
-                    "error",
-                ],
-            )
-            writer.writeheader()
+            csv.writer(f, delimiter=";").writerow(TABLE_COLUMNS)
     log_path.touch(exist_ok=True)
     return csv_path, log_path
 
@@ -77,33 +79,144 @@ def already_processed(log_path: Path) -> set[str]:
     }
 
 
+def format_phone(raw: str) -> str:
+    digits = re.sub(r"\D", "", raw or "")
+    if len(digits) == 11 and digits[0] in "78":
+        digits = digits[1:]
+    if len(digits) != 10:
+        return " ".join((raw or "").split())
+    return f"+7 {digits[0:3]} {digits[3:6]}-{digits[6:8]}-{digits[8:10]}"
+
+
+def format_sum(raw: str) -> str:
+    token = re.sub(r"[^\d.,]", "", raw or "").replace(".", ",")
+    if not token:
+        return ""
+    whole, _, frac = token.partition(",")
+    whole = whole.lstrip("0") or "0"
+    frac = ((frac or "") + "00")[:2]
+    groups: list[str] = []
+    while whole:
+        groups.append(whole[-3:])
+        whole = whole[:-3]
+    return " ".join(reversed(groups)) + "," + frac
+
+
+def split_act_title(title: str) -> tuple[str, str, str]:
+    """Полное название, номер вида АЗВ-0003788 и дата из строки списка."""
+    text = " ".join((title or "").split())
+    match = re.match(
+        r"^(?P<name>Акт\s+оценки)\s+(?P<num>\S+)\s+от\s+(?P<date>\d{2}\.\d{2}\.\d{4})"
+        r"(?:\s+(?P<time>\d{1,2}:\d{2}(?::\d{2})?))?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return text, "", ""
+    when = match.group("date")
+    if match.group("time"):
+        when = f"{when} {match.group('time')}"
+    return text, match.group("num"), when
+
+
+def table_row(result: ActResult) -> list[str]:
+    _full, number, when = split_act_title(result.act_title)
+    return [
+        result.act_title,
+        number,
+        when,
+        format_sum(result.amount),
+        format_phone(result.phone),
+        result.ticket_title,
+        result.error.strip(),
+        result.collected_at,
+    ]
+
+
+def _read_table(csv_path: Path) -> list[list[str]]:
+    rows: list[list[str]] = []
+    with csv_path.open(encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f, delimiter=";")
+        next(reader, None)
+        for row in reader:
+            if any(cell.strip() for cell in row):
+                rows.append(row)
+    return rows
+
+
+def _xlsx_cell(col: int, row: int, value: str, style: int) -> str:
+    letters = ""
+    number = col
+    while number:
+        number, rest = divmod(number - 1, 26)
+        letters = chr(65 + rest) + letters
+    text = xml_escape("".join(ch for ch in value if ch in "\t\n" or ord(ch) >= 32))
+    return f'<c r="{letters}{row}" t="inlineStr" s="{style}"><is><t>{text}</t></is></c>'
+
+
+def write_xlsx(csv_path: Path) -> Path:
+    rows = _read_table(csv_path)
+    sheet_rows = []
+    header = "".join(_xlsx_cell(i + 1, 1, name, 1) for i, name in enumerate(TABLE_COLUMNS))
+    sheet_rows.append(f'<row r="1">{header}</row>')
+    for index, row in enumerate(rows, start=2):
+        padded = list(row) + [""] * (len(TABLE_COLUMNS) - len(row))
+        cells = "".join(
+            _xlsx_cell(i + 1, index, padded[i], 0) for i in range(len(TABLE_COLUMNS))
+        )
+        sheet_rows.append(f'<row r="{index}">{cells}</row>')
+    last_row = max(1, len(rows) + 1)
+    last_col = chr(64 + len(TABLE_COLUMNS))
+    sheet = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+<cols>
+<col min="1" max="1" width="46" customWidth="1"/>
+<col min="2" max="2" width="16" customWidth="1"/>
+<col min="3" max="3" width="20" customWidth="1"/>
+<col min="4" max="4" width="16" customWidth="1"/>
+<col min="5" max="5" width="20" customWidth="1"/>
+<col min="6" max="6" width="42" customWidth="1"/>
+<col min="7" max="7" width="28" customWidth="1"/>
+<col min="8" max="8" width="20" customWidth="1"/>
+</cols>
+<sheetData>{"".join(sheet_rows)}</sheetData>
+<autoFilter ref="A1:{last_col}{last_row}"/>
+</worksheet>'''
+    styles = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>
+<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFF2CC"/></patternFill></fill></fills>
+<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="center"/></xf><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment vertical="center"/></xf></cellXfs>
+</styleSheet>'''
+    workbook = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Акты" sheetId="1" r:id="rId1"/></sheets></workbook>'''
+    content_types = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>'''
+    root_rels = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'''
+    workbook_rels = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'''
+    target = csv_path.with_suffix(".xlsx")
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as book:
+        book.writestr("[Content_Types].xml", content_types)
+        book.writestr("_rels/.rels", root_rels)
+        book.writestr("xl/workbook.xml", workbook)
+        book.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
+        book.writestr("xl/styles.xml", styles)
+        book.writestr("xl/worksheets/sheet1.xml", sheet)
+    return target
+
+
 def append_result(csv_path: Path, log_path: Path, result: ActResult) -> None:
     with csv_path.open("a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "collected_at",
-                "act_title",
-                "amount",
-                "phone",
-                "ticket_title",
-                "status",
-                "error",
-            ],
-        )
-        writer.writerow(
-            {
-                "collected_at": result.collected_at,
-                "act_title": result.act_title,
-                "amount": result.amount,
-                "phone": result.phone,
-                "ticket_title": result.ticket_title,
-                "status": result.status,
-                "error": result.error,
-            }
-        )
+        csv.writer(f, delimiter=";").writerow(table_row(result))
     with log_path.open("a", encoding="utf-8") as f:
         f.write(result.act_title + "\n")
+    table = write_xlsx(csv_path)
+    print(f"Записано в таблицу: {table}", flush=True)
 
 
 def region_right_of_label(
@@ -243,31 +356,55 @@ def _peach_top(img: Image.Image) -> Optional[tuple[int, int]]:
     return top, min(img.height, top + 36)
 
 
-def click_client_open_button(hwnd: int, img: Image.Image) -> bool:
-    """Квадрат открытия сразу за крестиком в поле «Клиент», до «Дата рождения»."""
+def client_open_square(
+    icons: list[tuple[int, int, int, int]],
+    label_x: int,
+    label_y: int,
+) -> Optional[tuple[int, int]]:
+    """Квадрат открытия — ближайший к слову «Дата», крестик левее него."""
+    candidates: list[tuple[int, int, int]] = []
+    for x, y, bw, bh in icons:
+        if not (8 <= bw <= 26 and 8 <= bh <= 26):
+            continue
+        if not 0.55 <= bw / max(bh, 1) <= 1.7:
+            continue
+        if abs(y - label_y) > 16:
+            continue
+        gap = label_x - x
+        if 6 <= gap <= 70:
+            candidates.append((gap, x, y))
+    if not candidates:
+        return None
+    _gap, x, y = min(candidates)
+    return x, y
+
+
+def click_client_open_button(hwnd: int, img: Image.Image, lang: str = "rus") -> bool:
+    """Квадрат справа от крестика в поле «Клиент», сразу перед «Дата рождения»."""
     band = _peach_top(img)
     if band is None:
         return False
     y0, y1 = band
-    icons = row_icons(img, 80, y0, int(img.width * 0.62), y1)
-    buttons = [
-        p
-        for p in icons
-        if 6 <= p[2] <= 22 and 6 <= p[3] <= 22 and 0.45 <= p[2] / p[3] <= 1.8 and p[1] < y0 + 28
-    ]
-    if not buttons:
-        return False
-    buttons.sort(key=lambda p: p[0])
-    # Крестик очистки стоит слева, кнопка открытия — следующий квадрат.
-    target = buttons[0]
-    for button in buttons[1:]:
-        if button[0] - target[0] <= 28:
-            target = button
-        else:
+    strip = img.crop((0, y0, img.width, y1))
+    words = ocr.word_boxes(strip, lang=lang, scale=1.0)
+    label_x = None
+    label_y = y0 + (y1 - y0) // 2
+    for word in words:
+        text = word["text"].casefold()
+        if "рожд" in text or text.startswith("дат"):
+            label_x = word["left"]
+            label_y = y0 + word["top"] + max(word["height"], 1) // 2
             break
-    cx, cy = target[0], target[1]
-    print(f"Кнопка клиента: {cx}, {cy}", flush=True)
-    w.click_window_relative(hwnd, cx, cy, image_size=img.size)
+    if label_x is None:
+        print("На залоговом билете не вижу «Дата рождения», кнопку клиента не жму.", flush=True)
+        return False
+    icons = row_icons(img, max(0, label_x - 90), y0 - 4, label_x - 2, y1 + 4)
+    point = client_open_square(icons, label_x, label_y)
+    if point is None:
+        print("Квадрат у «Дата рождения» не найден, кнопку клиента не жму.", flush=True)
+        return False
+    print(f"Кнопка клиента у «Дата рождения»: {point[0]}, {point[1]}", flush=True)
+    w.click_window_relative(hwnd, point[0], point[1], image_size=img.size)
     return True
 
 
@@ -590,7 +727,7 @@ def process_one_act(
     print(f"Залоговый билет: {ticket.title}. Жму кнопку у клиента", flush=True)
     ticket_img = w.screenshot_window(ticket.hwnd)
     before_client = snapshot_hwnds()
-    if not click_client_open_button(ticket.hwnd, ticket_img):
+    if not click_client_open_button(ticket.hwnd, ticket_img, lang):
         w.open_reference(ticket.hwnd)
     client = w.wait_for_window("Карточка", timeout=4)
     if not client:
@@ -841,4 +978,4 @@ def run(cfg: dict, pause: PauseController) -> None:
             break
         time.sleep(cfg["delays"]["between_acts"])
 
-    print(f"Готово. CSV: {csv_path}")
+    print(f"Готово. Таблица: {csv_path.with_suffix('.xlsx')}")

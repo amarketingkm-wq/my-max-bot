@@ -7,7 +7,7 @@
   "ticket_field_label": "Залоговый билет",
   "client_field_label": "Клиент",
   "phone_label": "Телефон +7",
-  "output_csv": "output/acts_phones.csv",
+  "output_csv": "output/акты.csv",
   "processed_log": "output/processed.txt",
   "max_acts": 0,
   "delays": {

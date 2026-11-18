@@ -156,17 +156,20 @@ namespace SborAktov
             Log("Начинаю сбор. 1С должна оставаться открытой.");
             Log("");
             int runCode = Run(venvPython, "-u run_collector.py", root, tesseract);
-            string csv = Path.Combine(root, "output", "acts_phones.csv");
+            string table = Path.Combine(root, "output", "акты.xlsx");
+            if (File.Exists(table))
+            {
+                Log("Таблица: " + table);
+                try { Process.Start(table); } catch { }
+            }
             if (_stop)
             {
                 Log("Остановлено.");
                 return;
             }
-            if (runCode == 0 && File.Exists(csv))
+            if (runCode == 0)
             {
-                Log("Готово. Открываю таблицу.");
-                Log(csv);
-                try { Process.Start(csv); } catch { }
+                Log("Готово.");
                 return;
             }
             Log("Сбор остановился. Причина — в строке «Ошибка» выше.");
