@@ -794,9 +794,6 @@ def safe_close(*wins: Optional[w.WindowInfo], delay: float = 0.5) -> None:
             if not w.wait_until_closed(item.hwnd, timeout=0.1):
                 w.close_window(item.hwnd)
                 time.sleep(delay)
-            if not w.wait_until_closed(item.hwnd, timeout=1.5):
-                w.press_escape(item.hwnd)
-                time.sleep(delay)
         except Exception:
             pass
 
@@ -982,11 +979,18 @@ def _run_query(dialog: w.WindowInfo, query: str, lang: str) -> None:
 
 
 def _close_search_dialog(dialog: Optional[w.WindowInfo], report_hwnd: int) -> None:
-    """Закрыть только окно «Поиск». Escape по отчёту закрывает сам отчёт."""
+    """Закрыть окно «Поиск» крестиком. Escape в 1С закрывает отчёт, поэтому его нет."""
     if dialog is None or dialog.hwnd == report_hwnd:
         return
-    w.press_escape(dialog.hwnd)
-    time.sleep(0.25)
+    image = w.screenshot_window(dialog.hwnd)
+    print("Закрываю окно поиска крестиком. Отчёт не закрываю.", flush=True)
+    w.click_window_relative(
+        dialog.hwnd,
+        max(8, image.width - 18),
+        14,
+        image_size=image.size,
+    )
+    time.sleep(0.3)
 
 
 def _row_matches(found: str, query: str, number: str) -> bool:
