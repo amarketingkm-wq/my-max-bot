@@ -861,64 +861,211 @@ def load_requested_acts(cfg: dict) -> list[str]:
     return read_act_titles(path)
 
 
-def _search_dialog() -> Optional[w.WindowInfo]:
+def _search_dialog(report_hwnd: int = 0) -> Optional[w.WindowInfo]:
     dialogs = [
         item
         for item in w.find_windows("Поиск")
-        if "поиск" in item.title.casefold() and item.width < 900
+        if "поиск" in item.title.casefold()
+        and item.width < 900
+        and item.hwnd != report_hwnd
     ]
     if not dialogs:
         return None
     return min(dialogs, key=lambda item: item.width * item.height)
 
 
-def _click_search_button(hwnd: int, lang: str) -> bool:
-    image = w.screenshot_window(hwnd)
-    words = ocr.word_boxes(image, lang=lang, scale=1.5)
-    buttons = [
+def _wait_search_dialog(report_hwnd: int, timeout: float = 1.6) -> Optional[w.WindowInfo]:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        dialog = _search_dialog(report_hwnd)
+        if dialog is not None:
+            return dialog
+        time.sleep(0.2)
+    return None
+
+
+def _word_point(word: dict) -> tuple[int, int]:
+    return (
+        word["left"] + max(word["width"], 1) // 2,
+        word["top"] + max(word["height"], 1) // 2,
+    )
+
+
+def report_find_button(words: list[dict], height: int) -> Optional[dict]:
+    """Кнопка «Найти...» в командной панели отчёта, не общий поиск 1С."""
+    limit = int(height * 0.35)
+    found = [
         word
         for word in words
-        if word["text"].casefold().startswith(("иска", "найт"))
+        if word["text"].casefold().startswith("найт") and word["top"] < limit
     ]
+    if not found:
+        return None
+    return min(found, key=lambda word: word["top"])
+
+
+def seek_button(words: list[dict]) -> Optional[dict]:
+    """Кнопка «Искать» в окне поиска. Рядом обычно «Отмена»."""
+    buttons = [word for word in words if word["text"].casefold().startswith("иска")]
     if not buttons:
-        print("Кнопку «Искать» не вижу, жму Enter.", flush=True)
-        w.press_enter(hwnd)
+        return None
+    cancels = [
+        word
+        for word in words
+        if word["text"].casefold().startswith(("отмен", "закры"))
+    ]
+    if not cancels:
+        return buttons[-1]
+
+    def near(button: dict) -> int:
+        bx, by = _word_point(button)
+        return min(abs(bx - cx) + abs(by - cy) for cx, cy in map(_word_point, cancels))
+
+    return min(buttons, key=near)
+
+
+def _focus_report_table(list_win: w.WindowInfo) -> None:
+    """Щелчок по ячейке отчёта. Тогда Ctrl+F открывает поиск таблицы."""
+    image = w.screenshot_window(list_win.hwnd)
+    x = max(40, int(image.width * 0.28))
+    y = max(40, int(image.height * 0.58))
+    w.click_window_relative(list_win.hwnd, x, y, image_size=image.size)
+    time.sleep(0.3)
+
+
+def _click_word(hwnd: int, word: dict, image_size: tuple[int, int]) -> None:
+    x, y = _word_point(word)
+    w.click_window_relative(hwnd, x, y, image_size=image_size)
+
+
+def _open_report_search(list_win: w.WindowInfo, lang: str) -> Optional[w.WindowInfo]:
+    """Поиск внутри отчёта. Общий поиск 1С и Escape по отчёту не используются."""
+    dialog = _search_dialog(list_win.hwnd)
+    if dialog is not None:
+        return dialog
+    print("Щёлкаю таблицу отчёта и открываю поиск.", flush=True)
+    _focus_report_table(list_win)
+    w.press_find(list_win.hwnd)
+    dialog = _wait_search_dialog(list_win.hwnd)
+    if dialog is not None:
+        return dialog
+    image = w.screenshot_window(list_win.hwnd)
+    words = ocr.word_boxes(image, lang=lang, scale=1.5)
+    button = report_find_button(words, image.height)
+    if button is None:
+        print("Поиск внутри отчёта не открылся. Отчёт не закрываю.", flush=True)
+        return None
+    print("Жму «Найти...» в самом отчёте.", flush=True)
+    _click_word(list_win.hwnd, button, image.size)
+    return _wait_search_dialog(list_win.hwnd)
+
+
+def _run_query(dialog: w.WindowInfo, query: str, lang: str) -> None:
+    image = w.screenshot_window(dialog.hwnd)
+    w.click_window_relative(
+        dialog.hwnd,
+        max(20, int(image.width * 0.45)),
+        max(16, int(image.height * 0.22)),
+        image_size=image.size,
+    )
+    time.sleep(0.1)
+    w.paste_text(dialog.hwnd, query)
+    time.sleep(0.15)
+    words = ocr.word_boxes(image, lang=lang, scale=1.5)
+    button = seek_button(words)
+    if button is None:
+        print("Кнопку «Искать» не вижу, жму Enter в окне поиска.", flush=True)
+        w.press_enter(dialog.hwnd)
+        return
+    print("Жму «Искать».", flush=True)
+    _click_word(dialog.hwnd, button, image.size)
+
+
+def _close_search_dialog(dialog: Optional[w.WindowInfo], report_hwnd: int) -> None:
+    """Закрыть только окно «Поиск». Escape по отчёту закрывает сам отчёт."""
+    if dialog is None or dialog.hwnd == report_hwnd:
+        return
+    w.press_escape(dialog.hwnd)
+    time.sleep(0.25)
+
+
+def _row_matches(found: str, query: str, number: str) -> bool:
+    text = found.casefold()
+    if number and number.casefold() in text:
         return True
-    button = max(buttons, key=lambda word: word["top"])
-    cx = button["left"] + max(button["width"], 1) // 2
-    cy = button["top"] + max(button["height"], 1) // 2
-    print(f"Кнопка «Искать»: {cx}, {cy}", flush=True)
-    w.click_window_relative(hwnd, cx, cy, image_size=image.size)
-    return True
+    return bool(found) and text.startswith("акт") and query.casefold() in text
+
+
+def _search_on_open_panel(
+    list_win: w.WindowInfo,
+    title: str,
+    lang: str,
+    number: str,
+) -> bool:
+    """Панель «Искать» внутри отчёта. Escape не нажимается."""
+    for query in search_queries(title):
+        image = w.screenshot_window(list_win.hwnd)
+        words = ocr.word_boxes(image, lang=lang, scale=1.5)
+        button = seek_button(words)
+        if button is None:
+            print("Окно поиска в отчёте не вижу. Отчёт не закрываю.", flush=True)
+            return False
+        _, field_y = _word_point(button)
+        w.click_window_relative(
+            list_win.hwnd,
+            max(10, button["left"] - 90),
+            field_y,
+            image_size=image.size,
+        )
+        time.sleep(0.1)
+        print(f"Поиск в отчёте: {query}", flush=True)
+        w.paste_text(list_win.hwnd, query)
+        time.sleep(0.15)
+        _click_word(list_win.hwnd, button, image.size)
+        time.sleep(0.7)
+        image = w.screenshot_window(list_win.hwnd)
+        words = ocr.word_boxes(image, lang=lang, scale=1.5)
+        cancels = [
+            word
+            for word in words
+            if word["text"].casefold().startswith(("отмен", "закры"))
+        ]
+        if cancels and button is not None:
+            bx, by = _word_point(button)
+            cancel = min(
+                cancels,
+                key=lambda word: abs(_word_point(word)[0] - bx) + abs(_word_point(word)[1] - by),
+            )
+            _click_word(list_win.hwnd, cancel, image.size)
+            time.sleep(0.25)
+        found = row_act_name(list_win, lang)
+        if _row_matches(found, query, number):
+            print(f"Строка найдена: {found}", flush=True)
+            return True
+        print("Этот запрос строку не выделил. Отчёт остаётся открытым.", flush=True)
+    return False
 
 
 def search_for_act(list_win: w.WindowInfo, title: str, lang: str) -> bool:
-    """Ctrl+F, вставить акт, нажать «Искать», дождаться выделения строки."""
+    """Поиск в открытом отчёте: Ctrl+F, вставка, «Искать», выделенная строка."""
     number = act_number(title)
+    dialog = _open_report_search(list_win, lang)
+    if dialog is None:
+        return _search_on_open_panel(list_win, title, lang, number)
     for query in search_queries(title):
-        print(f"Поиск: {query}", flush=True)
-        w.brief_focus(list_win.hwnd)
-        w.press_find(list_win.hwnd)
-        time.sleep(0.6)
-        dialog = _search_dialog() or list_win
-        w.paste_text(dialog.hwnd, query)
-        time.sleep(0.2)
-        _click_search_button(dialog.hwnd, lang)
+        print(f"Поиск в отчёте: {query}", flush=True)
+        _run_query(dialog, query, lang)
         time.sleep(0.7)
-        dialog = _search_dialog()
-        if dialog is not None:
-            w.press_escape(dialog.hwnd)
-            time.sleep(0.3)
+        _close_search_dialog(dialog, list_win.hwnd)
         found = row_act_name(list_win, lang)
-        if number and number.casefold() in found.casefold():
+        if _row_matches(found, query, number):
             print(f"Строка найдена: {found}", flush=True)
             return True
-        if found and found.casefold().startswith("акт") and query.casefold() in found.casefold():
-            print(f"Строка найдена: {found}", flush=True)
-            return True
-        print("Этот запрос строку не выделил.", flush=True)
-        w.press_escape(list_win.hwnd)
-        time.sleep(0.2)
+        print("Этот запрос строку не выделил. Отчёт остаётся открытым.", flush=True)
+        dialog = _open_report_search(list_win, lang)
+        if dialog is None:
+            return False
+    _close_search_dialog(dialog, list_win.hwnd)
     return False
 
 
@@ -1202,10 +1349,7 @@ def ensure_act_row(list_win: w.WindowInfo, lang: str) -> str:
 
 
 def back_to_list(list_win: w.WindowInfo) -> None:
-    """Закрыть всплывшее окно и вернуть курсор в список актов."""
-    w.brief_focus(list_win.hwnd)
-    w.press_escape(list_win.hwnd)
-    time.sleep(0.2)
+    """Вернуть фокус в отчёт. Escape не жмём: в 1С он закрывает отчёт."""
     w.brief_focus(list_win.hwnd)
 
 
