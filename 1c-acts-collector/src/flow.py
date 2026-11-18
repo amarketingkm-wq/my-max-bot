@@ -210,11 +210,42 @@ def write_xlsx(csv_path: Path) -> Path:
     return target
 
 
+def collected_acts(csv_path: Path) -> set[str]:
+    """Акты, у которых в таблице уже лежит телефон из 10 цифр на 9."""
+    if not csv_path.exists():
+        return set()
+    found: set[str] = set()
+    for row in _read_table(csv_path):
+        if row and revealed_phone(row[4] if len(row) > 4 else ""):
+            found.add(row[0])
+    return found
+
+
 def append_result(csv_path: Path, log_path: Path, result: ActResult) -> None:
-    with csv_path.open("a", newline="", encoding="utf-8-sig") as f:
-        csv.writer(f, delimiter=";").writerow(table_row(result))
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write(result.act_title + "\n")
+    rows = _read_table(csv_path) if csv_path.exists() else []
+    new_row = table_row(result)
+    body: list[list[str]] = []
+    replaced = False
+    for row in rows:
+        if row and row[0] == result.act_title:
+            body.append(new_row)
+            replaced = True
+        else:
+            body.append(row)
+    if not replaced:
+        body.append(new_row)
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f, delimiter=";")
+        writer.writerow(TABLE_COLUMNS)
+        writer.writerows(body)
+    phone_ok = bool(revealed_phone(result.phone))
+    known = already_processed(log_path)
+    if phone_ok and result.act_title not in known:
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(result.act_title + "\n")
+    if not phone_ok and result.act_title in known:
+        kept = [line for line in known if line != result.act_title]
+        log_path.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
     table = write_xlsx(csv_path)
     print(f"Записано в таблицу: {table}", flush=True)
 
@@ -428,26 +459,126 @@ def _saturation(img: Image.Image, x: int, y: int) -> float:
     return float((patch.max(axis=2) - patch.min(axis=2)).mean())
 
 
-def click_phone_magnifier(hwnd: int, img: Image.Image) -> Optional[tuple[int, int]]:
-    """Лупа справа от скрытого номера. Цветные значки (мессенджер, трубка) пропускаются."""
+def phone_icon_cluster(img: Image.Image) -> list[tuple[int, int, int, int]]:
+    """Четыре значка справа от номера: мессенджер, лупа, карандаш, трубка."""
     height, width = img.height, img.width
-    for y0 in range(int(height * 0.42), int(height * 0.82), 14):
-        icons = row_icons(img, int(width * 0.28), y0, int(width * 0.72), y0 + 34)
-        merged: list[tuple[int, int, int, int]] = []
+    best: list[tuple[int, int, int, int]] = []
+    best_score = -1
+    for y0 in range(int(height * 0.40), int(height * 0.86), 8):
+        icons = [
+            icon
+            for icon in row_icons(img, 40, y0, int(width * 0.92), y0 + 30)
+            if 12 <= icon[2] <= 36 and 12 <= icon[3] <= 36
+        ]
+        group: list[tuple[int, int, int, int]] = []
+        groups: list[list[tuple[int, int, int, int]]] = []
         for icon in icons:
-            if merged and abs(icon[0] - merged[-1][0]) <= 14 and abs(icon[1] - merged[-1][1]) <= 10:
+            if group and icon[0] - group[-1][0] > 70:
+                groups.append(group)
+                group = [icon]
+            else:
+                group.append(icon)
+        if group:
+            groups.append(group)
+        for item in groups:
+            if not 3 <= len(item) <= 4:
                 continue
-            merged.append(icon)
-        if len(merged) < 3:
+            if item[-1][0] - item[0][0] > 220:
+                continue
+            if max(icon[1] for icon in item) - min(icon[1] for icon in item) > 12:
+                continue
+            score = len(item) * 10
+            if len(item) >= 2 and _saturation(img, item[0][0], item[0][1]) > _saturation(img, item[1][0], item[1][1]) + 8:
+                score += 5
+            if score > best_score:
+                best_score = score
+                best = item
+    return best
+
+
+def phone_digit_box(
+    img: Image.Image,
+    cluster: list[tuple[int, int, int, int]],
+) -> Optional[tuple[int, int, int, int]]:
+    """Прямоугольник цифр сразу слева от значков. ИНН справа от значков сюда не входит."""
+    if not cluster:
+        return None
+    anchor_x = min(icon[0] - icon[2] // 2 for icon in cluster)
+    anchor_y = cluster[0][1]
+    y0 = max(0, anchor_y - 16)
+    y1 = min(img.height, anchor_y + 16)
+    x1 = max(0, anchor_x - 8)
+    if x1 < 30 or y1 <= y0:
+        return None
+    rgb = np.array(img.crop((0, y0, x1, y1)).convert("RGB"))
+    red = rgb[:, :, 0].astype(int)
+    green = rgb[:, :, 1].astype(int)
+    blue = rgb[:, :, 2].astype(int)
+    ink = (rgb.min(axis=2) < 175) | ((green > red + 15) & (green > 80) & (red < 220))
+    if ink.size == 0:
+        return None
+    filled = ink.mean(axis=0) > 0.04
+    gap = 0
+    closed = filled.copy()
+    for x in range(filled.shape[0]):
+        if filled[x]:
+            if 0 < gap <= 6:
+                closed[x - gap : x] = True
+            gap = 0
+        else:
+            gap += 1
+    runs: list[tuple[int, int]] = []
+    x = 0
+    width = closed.shape[0]
+    while x < width:
+        if not closed[x]:
+            x += 1
             continue
-        gray = [icon for icon in merged if _saturation(img, icon[0], icon[1]) < 28]
-        if not gray:
+        start = x
+        while x < width and closed[x]:
+            x += 1
+        if x - start >= 24:
+            runs.append((start, x - 1))
+    if not runs:
+        return None
+    # Ближний к значкам фрагмент — это сам номер, не подпись «Телефон» слева.
+    start, end = runs[-1]
+    if end - start > 160:
+        start = end - 160
+    return start, y0, min(x1, end + 2), y1
+
+
+def revealed_phone(text: str, tail: str = "") -> str:
+    """10 цифр с девятки. Хвост маски (0661) обязан совпасть. ИНН из 12 цифр не берётся."""
+    digits = re.sub(r"\D", "", text or "")
+    tail_digits = re.sub(r"\D", "", tail or "")
+    for index in range(0, max(0, len(digits) - 9) + 1):
+        chunk = digits[index : index + 10]
+        if len(chunk) < 10 or not chunk.startswith("9"):
             continue
-        cx, cy = gray[0][0], gray[0][1]
-        print(f"Лупа телефона: {cx}, {cy}", flush=True)
-        w.click_window_relative(hwnd, cx, cy, image_size=img.size)
-        return cx, cy
-    return None
+        if tail_digits and not chunk.endswith(tail_digits):
+            continue
+        return chunk
+    return ""
+
+
+def masked_tail(text: str) -> str:
+    """Видимый конец маски: из «*******0661» получается 0661."""
+    match = re.search(r"\*+(\d{2,4})", text or "")
+    if match:
+        return match.group(1)
+    return ""
+
+
+def click_phone_magnifier(hwnd: int, img: Image.Image) -> Optional[tuple[int, int]]:
+    """Лупа — второй значок в ряду справа от номера, сразу за мессенджером."""
+    cluster = phone_icon_cluster(img)
+    if len(cluster) < 2:
+        return None
+    target = cluster[1]
+    print(f"Лупа телефона: {target[0]}, {target[1]}", flush=True)
+    w.click_window_relative(hwnd, target[0], target[1], image_size=img.size)
+    return target[0], target[1]
 
 
 def click_edge_button(hwnd: int, img: Image.Image, y_center: int) -> bool:
@@ -777,6 +908,15 @@ def process_one_act(
 
     print(f"Карточка: {client.title}. Жму лупу у телефона", flush=True)
     client_img = w.screenshot_window(client.hwnd)
+    before_box = phone_digit_box(client_img, phone_icon_cluster(client_img))
+    tail = ""
+    if before_box is not None:
+        masked = client_img.crop(before_box)
+        tail = masked_tail(
+            ocr.read_text(masked, lang=lang, whitelist="0123456789*", psm=7)
+        )
+        if tail:
+            print(f"До лупы виден конец номера: {tail}", flush=True)
     eye = click_phone_magnifier(client.hwnd, client_img)
     if eye is None and not click_reveal_phone(client.hwnd, client_img, cfg["phone_label"], lang=lang):
         save_debug(client_img, "client_no_reveal")
@@ -794,24 +934,21 @@ def process_one_act(
     time.sleep(delays["after_reveal"])
     client_img2 = w.screenshot_window(client.hwnd)
     phone = ""
-    if eye is not None:
-        shown = client_img2.crop(
-            (
-                max(0, eye[0] - 320),
-                max(0, eye[1] - 22),
-                max(0, eye[0] - 4),
-                min(client_img2.height, eye[1] + 22),
-            )
-        )
-        phone = ocr.extract_phone(shown, lang=lang) or ""
-    if not phone:
-        region = region_right_of_label(
-            client_img2, cfg["phone_label"], width=300, height=42, lang=lang
-        )
-        if region is not None:
-            phone = ocr.extract_phone(region, lang=lang) or ""
-    if not phone:
-        save_debug(client_img2, "phone_ocr_fail")
+    digit_box = phone_digit_box(client_img2, phone_icon_cluster(client_img2))
+    shown = client_img2.crop(digit_box) if digit_box is not None else None
+    if shown is not None:
+        enlarged = shown.resize((shown.width * 3, shown.height * 3), Image.Resampling.LANCZOS)
+        heard = ocr.read_text(enlarged, lang=lang, whitelist="0123456789", psm=7)
+        phone = revealed_phone(heard, tail)
+        if not phone and tail:
+            phone = revealed_phone(heard)
+        print(f"Цифры после лупы: {heard.strip() or '-'} -> {phone or 'не номер'}", flush=True)
+    if not phone and shown is not None:
+        folder = ROOT / "output" / "номера"
+        folder.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^\w\-]+", "_", list_name)[:40] or "номер"
+        shown.save(folder / f"{safe}.png")
+        print(f"Цифры не прочитаны, сохранён узкий фрагмент: {folder / (safe + '.png')}", flush=True)
 
     close_opened_forms([client, ticket, act], list_win.hwnd, delays["after_close"])
 
@@ -939,7 +1076,7 @@ def advance_to_next_act(list_win: w.WindowInfo, lang: str, previous: str) -> str
 def run(cfg: dict, pause: PauseController) -> None:
     ocr.configure_tesseract(cfg.get("ocr", {}).get("tesseract_cmd") or "")
     csv_path, log_path = ensure_output(cfg)
-    done = already_processed(log_path)
+    done = collected_acts(csv_path)
 
     list_win = w.find_1c_window(cfg.get("list_window_title_substr") or "")
     if not list_win:
@@ -974,7 +1111,11 @@ def run(cfg: dict, pause: PauseController) -> None:
             print(f"Пропуск (уже было): {result.act_title}")
         elif result.act_title and result.act_title != "(не открылся)":
             append_result(csv_path, log_path, result)
-            done.add(result.act_title)
+            if revealed_phone(result.phone):
+                done.add(result.act_title)
+            else:
+                done.discard(result.act_title)
+                print("Номер не собран, этот акт будет взят снова.", flush=True)
             processed += 1
             empty_streak = 0 if result.status in ("ok", "partial") else empty_streak + 1
             print(

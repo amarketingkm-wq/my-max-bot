@@ -51,8 +51,8 @@ def preprocess_for_ocr(image: Image.Image, scale: float = 2.0) -> np.ndarray:
     return thr
 
 
-def read_text(image: Image.Image, lang: str = "eng+rus", whitelist: str = "") -> str:
-    cfg = "--psm 6"
+def read_text(image: Image.Image, lang: str = "eng+rus", whitelist: str = "", psm: int = 6) -> str:
+    cfg = f"--psm {psm}"
     if whitelist:
         cfg += f" -c tessedit_char_whitelist={whitelist}"
     prepared = preprocess_for_ocr(image)
