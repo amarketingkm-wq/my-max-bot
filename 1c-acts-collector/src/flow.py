@@ -348,62 +348,73 @@ def _peach_top(img: Image.Image) -> Optional[tuple[int, int]]:
     rgb = np.array(img.convert("RGB"))
     red, green, blue = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
     peach = (red > 210) & (green > 185) & (blue > 160) & (blue < 235) & ((red.astype(int) - blue.astype(int)) > 12)
-    fill = peach.mean(axis=1)
-    rows = np.where(fill > 0.22)[0]
-    if len(rows) == 0:
-        return None
-    top = int(rows[0])
-    return top, min(img.height, top + 36)
+    solid = peach.mean(axis=1) > 0.55
+    start = None
+    for y, on in enumerate(solid.tolist()):
+        if on and start is None:
+            start = y
+        elif not on and start is not None:
+            if y - start >= 12:
+                return start, min(img.height, start + 32)
+            start = None
+    if start is not None and img.height - start >= 12:
+        return start, min(img.height, start + 32)
+    return None
 
 
-def client_open_square(
-    icons: list[tuple[int, int, int, int]],
-    label_x: int,
-    label_y: int,
-) -> Optional[tuple[int, int]]:
-    """Квадрат открытия — ближайший к слову «Дата», крестик левее него."""
-    candidates: list[tuple[int, int, int]] = []
-    for x, y, bw, bh in icons:
-        if not (8 <= bw <= 26 and 8 <= bh <= 26):
-            continue
-        if not 0.55 <= bw / max(bh, 1) <= 1.7:
-            continue
-        if abs(y - label_y) > 16:
-            continue
-        gap = label_x - x
-        if 6 <= gap <= 70:
-            candidates.append((gap, x, y))
-    if not candidates:
-        return None
-    _gap, x, y = min(candidates)
-    return x, y
-
-
-def click_client_open_button(hwnd: int, img: Image.Image, lang: str = "rus") -> bool:
-    """Квадрат справа от крестика в поле «Клиент», сразу перед «Дата рождения»."""
+def client_field_point(img: Image.Image) -> Optional[tuple[int, int]]:
+    """Точка в поле «Клиент:», на фамилии, левее крестика."""
     band = _peach_top(img)
     if band is None:
-        return False
-    y0, y1 = band
-    strip = img.crop((0, y0, img.width, y1))
-    words = ocr.word_boxes(strip, lang=lang, scale=1.0)
-    label_x = None
-    label_y = y0 + (y1 - y0) // 2
-    for word in words:
-        text = word["text"].casefold()
-        if "рожд" in text or text.startswith("дат"):
-            label_x = word["left"]
-            label_y = y0 + word["top"] + max(word["height"], 1) // 2
-            break
-    if label_x is None:
-        print("На залоговом билете не вижу «Дата рождения», кнопку клиента не жму.", flush=True)
-        return False
-    icons = row_icons(img, max(0, label_x - 90), y0 - 4, label_x - 2, y1 + 4)
-    point = client_open_square(icons, label_x, label_y)
+        return None
+    y0, _y1 = band
+    y1 = min(img.height, y0 + 30)
+    rgb = np.array(img.crop((0, y0, img.width, y1)).convert("RGB"))
+    height, width = rgb.shape[:2]
+    if height < 8 or width < 8:
+        return None
+    ink = rgb.min(axis=2) < 175
+    filled = ink.mean(axis=0) > 0.1
+    closed = filled.copy()
+    gap = 0
+    for x in range(width):
+        if filled[x]:
+            if 0 < gap <= 8:
+                closed[x - gap : x] = True
+            gap = 0
+        else:
+            gap += 1
+    runs: list[tuple[int, int]] = []
+    x = 0
+    while x < width:
+        if not closed[x]:
+            x += 1
+            continue
+        start = x
+        while x < width and closed[x]:
+            x += 1
+        if x - start >= 12:
+            runs.append((start, x - 1))
+    field = [run for run in runs if 70 < run[0] < width * 0.5]
+    if not field:
+        return None
+    label = field[0]
+    if len(field) > 1 and field[1][0] - label[1] < 40:
+        name_start = field[1][0]
+        name_end = field[1][1]
+        cx = name_start + min(24, max(8, (name_end - name_start) // 5))
+    else:
+        cx = (label[0] + label[1]) // 2
+    return int(cx), int(y0 + height // 2)
+
+
+def focus_client_field(hwnd: int, img: Image.Image) -> bool:
+    """Щелчок по полю «Клиент:», без крестика и без квадрата открытия."""
+    point = client_field_point(img)
     if point is None:
-        print("Квадрат у «Дата рождения» не найден, кнопку клиента не жму.", flush=True)
+        print("Поле «Клиент» на залоговом билете не вижу, Ctrl+Shift+F4 не жму.", flush=True)
         return False
-    print(f"Кнопка клиента у «Дата рождения»: {point[0]}, {point[1]}", flush=True)
+    print(f"Поле «Клиент»: {point[0]}, {point[1]}", flush=True)
     w.click_window_relative(hwnd, point[0], point[1], image_size=img.size)
     return True
 
@@ -724,11 +735,23 @@ def process_one_act(
     time.sleep(delays["after_open"])
     pause.wait_if_paused()
 
-    print(f"Залоговый билет: {ticket.title}. Жму кнопку у клиента", flush=True)
+    print(f"Залоговый билет: {ticket.title}. Сначала поле «Клиент», затем Ctrl+Shift+F4", flush=True)
     ticket_img = w.screenshot_window(ticket.hwnd)
     before_client = snapshot_hwnds()
-    if not click_client_open_button(ticket.hwnd, ticket_img, lang):
-        w.open_reference(ticket.hwnd)
+    if not focus_client_field(ticket.hwnd, ticket_img):
+        save_debug(ticket_img, "ticket_no_client_field")
+        close_opened_forms([ticket, act], list_win.hwnd, delays["after_close"])
+        return ActResult(
+            act_title=list_name,
+            amount=amount,
+            phone="",
+            ticket_title=ticket.title,
+            status="error",
+            error="Не вижу поле «Клиент» на залоговом билете",
+            collected_at=_now(),
+        )
+    time.sleep(0.25)
+    w.open_reference(ticket.hwnd)
     client = w.wait_for_window("Карточка", timeout=4)
     if not client:
         client = wait_new_window(
