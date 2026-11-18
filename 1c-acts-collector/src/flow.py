@@ -160,11 +160,21 @@ def row_icons(
     rgb = np.array(img.crop((x0, y0, x1, y1)).convert("RGB"))
     ink = rgb.min(axis=2) < 205
     height, width = ink.shape
-    # Горизонтальная рамка поля идёт через всю строку и склеивает кнопку с текстом.
-    row_fill = ink.mean(axis=1)
-    ink[row_fill > 0.45] = False
-    col_fill = ink.mean(axis=0)
-    ink[:, col_fill > 0.55] = False
+    # Сплошная рамка поля. Текст её не даёт: у букв нет непрерывной полосы.
+    for yy in range(height):
+        run = longest = 0
+        for on in ink[yy]:
+            run = run + 1 if on else 0
+            longest = max(longest, run)
+        if longest > width * 0.65:
+            ink[yy] = False
+    for xx in range(width):
+        run = longest = 0
+        for on in ink[:, xx]:
+            run = run + 1 if on else 0
+            longest = max(longest, run)
+        if longest > height * 0.75:
+            ink[:, xx] = False
     seen = np.zeros_like(ink, dtype=bool)
     centers: list[tuple[int, int]] = []
     ys, xs = np.where(ink)
@@ -190,11 +200,13 @@ def row_icons(
                     seen[ny, nx] = True
                     stack.append((ny, nx))
         bw, bh = maxx - minx + 1, maxy - miny + 1
-        if not (8 <= bw <= 32 and 8 <= bh <= 32):
+        if not (6 <= bw <= 32 and 6 <= bh <= 32):
             continue
-        if count < 12:
+        if count < 8:
             continue
-        centers.append((x0 + (minx + maxx) // 2, y0 + (miny + maxy) // 2))
+        centers.append(
+            (x0 + (minx + maxx) // 2, y0 + (miny + maxy) // 2, bw, bh)
+        )
     centers.sort(key=lambda p: p[0])
     return centers
 
@@ -208,12 +220,85 @@ def click_header_open_button(hwnd: int, img: Image.Image) -> bool:
         img.width - 3,
         int(img.height * 0.40),
     )
+    icons = [p for p in icons if p[2] >= 8 and p[3] >= 8 and 0.5 <= p[2] / p[3] <= 2.2]
     if not icons:
         return False
-    cx, cy = max(icons, key=lambda point: point[1])
+    cx, cy = max(icons, key=lambda point: point[1])[:2]
     print(f"Кнопка у правого края: {cx}, {cy}", flush=True)
     w.click_window_relative(hwnd, cx, cy, image_size=img.size)
     return True
+
+
+def _peach_top(img: Image.Image) -> Optional[tuple[int, int]]:
+    """Верх бежевой полосы «Клиент» на залоговом билете."""
+    rgb = np.array(img.convert("RGB"))
+    red, green, blue = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    peach = (red > 210) & (green > 185) & (blue > 160) & (blue < 235) & ((red.astype(int) - blue.astype(int)) > 12)
+    fill = peach.mean(axis=1)
+    rows = np.where(fill > 0.22)[0]
+    if len(rows) == 0:
+        return None
+    top = int(rows[0])
+    return top, min(img.height, top + 36)
+
+
+def click_client_open_button(hwnd: int, img: Image.Image) -> bool:
+    """Квадрат открытия сразу за крестиком в поле «Клиент», до «Дата рождения»."""
+    band = _peach_top(img)
+    if band is None:
+        return False
+    y0, y1 = band
+    icons = row_icons(img, 80, y0, int(img.width * 0.62), y1)
+    buttons = [
+        p
+        for p in icons
+        if 6 <= p[2] <= 22 and 6 <= p[3] <= 22 and 0.45 <= p[2] / p[3] <= 1.8 and p[1] < y0 + 28
+    ]
+    if not buttons:
+        return False
+    buttons.sort(key=lambda p: p[0])
+    # Крестик очистки стоит слева, кнопка открытия — следующий квадрат.
+    target = buttons[0]
+    for button in buttons[1:]:
+        if button[0] - target[0] <= 28:
+            target = button
+        else:
+            break
+    cx, cy = target[0], target[1]
+    print(f"Кнопка клиента: {cx}, {cy}", flush=True)
+    w.click_window_relative(hwnd, cx, cy, image_size=img.size)
+    return True
+
+
+def _saturation(img: Image.Image, x: int, y: int) -> float:
+    patch = np.array(
+        img.crop((max(0, x - 10), max(0, y - 10), min(img.width, x + 10), min(img.height, y + 10))).convert("RGB")
+    ).astype(int)
+    if patch.size == 0:
+        return 0.0
+    return float((patch.max(axis=2) - patch.min(axis=2)).mean())
+
+
+def click_phone_magnifier(hwnd: int, img: Image.Image) -> Optional[tuple[int, int]]:
+    """Лупа справа от скрытого номера. Цветные значки (мессенджер, трубка) пропускаются."""
+    height, width = img.height, img.width
+    for y0 in range(int(height * 0.42), int(height * 0.82), 14):
+        icons = row_icons(img, int(width * 0.28), y0, int(width * 0.72), y0 + 34)
+        merged: list[tuple[int, int, int, int]] = []
+        for icon in icons:
+            if merged and abs(icon[0] - merged[-1][0]) <= 14 and abs(icon[1] - merged[-1][1]) <= 10:
+                continue
+            merged.append(icon)
+        if len(merged) < 3:
+            continue
+        gray = [icon for icon in merged if _saturation(img, icon[0], icon[1]) < 28]
+        if not gray:
+            continue
+        cx, cy = gray[0][0], gray[0][1]
+        print(f"Лупа телефона: {cx}, {cy}", flush=True)
+        w.click_window_relative(hwnd, cx, cy, image_size=img.size)
+        return cx, cy
+    return None
 
 
 def click_edge_button(hwnd: int, img: Image.Image, y_center: int) -> bool:
@@ -486,19 +571,10 @@ def process_one_act(
     time.sleep(delays["after_open"])
     pause.wait_if_paused()
 
-    print(f"Залоговый билет: {ticket.title}. Жму кнопку у клиента")
+    print(f"Залоговый билет: {ticket.title}. Жму кнопку у клиента", flush=True)
     ticket_img = w.screenshot_window(ticket.hwnd)
     before_client = snapshot_hwnds()
-    client_box = ocr.find_label_box(ticket_img, cfg["client_field_label"], lang=lang)
-    if client_box:
-        x, y, ww, hh = client_box
-        # Кнопка открытия стоит сразу за крестиком, до поля «Дата рождения».
-        icons = row_icons(ticket_img, x + ww + 8, y - 8, x + ww + 520, y + hh + 16)
-        if icons:
-            w.click_window_relative(ticket.hwnd, icons[-1][0], icons[-1][1], image_size=ticket_img.size)
-        else:
-            w.open_reference(ticket.hwnd)
-    else:
+    if not click_client_open_button(ticket.hwnd, ticket_img):
         w.open_reference(ticket.hwnd)
     client = w.wait_for_window("Карточка", timeout=4)
     if not client:
@@ -523,16 +599,9 @@ def process_one_act(
     time.sleep(delays["after_open"])
     pause.wait_if_paused()
 
-    print(f"Карточка: {client.title}. Жму глаз у телефона")
+    print(f"Карточка: {client.title}. Жму лупу у телефона", flush=True)
     client_img = w.screenshot_window(client.hwnd)
-    phone_box = ocr.find_label_box(client_img, cfg["phone_label"], lang=lang)
-    eye = None
-    if phone_box:
-        x, y, ww, hh = phone_box
-        icons = row_icons(client_img, x + ww + 20, y - 12, x + ww + 780, y + hh + 20)
-        if icons:
-            eye = icons[0]
-            w.click_window_relative(client.hwnd, eye[0], eye[1], image_size=client_img.size)
+    eye = click_phone_magnifier(client.hwnd, client_img)
     if eye is None and not click_reveal_phone(client.hwnd, client_img, cfg["phone_label"], lang=lang):
         save_debug(client_img, "client_no_reveal")
         close_opened_forms([client, ticket, act], list_win.hwnd, delays["after_close"])
@@ -552,7 +621,7 @@ def process_one_act(
     if eye is not None:
         shown = client_img2.crop(
             (
-                max(0, eye[0] - 190),
+                max(0, eye[0] - 320),
                 max(0, eye[1] - 22),
                 max(0, eye[0] - 4),
                 min(client_img2.height, eye[1] + 22),
