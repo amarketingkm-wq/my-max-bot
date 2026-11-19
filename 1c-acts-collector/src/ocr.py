@@ -15,6 +15,22 @@ PHONE_RE = re.compile(
 SUM_RE = re.compile(r"\d{1,3}(?:[ \u00A0]\d{3})*(?:[.,]\d{2})?|\d+(?:[.,]\d{2})?")
 
 
+def _ocr(call, lang: str):
+    """eng+rus, затем каждый язык отдельно. Наружу уходит первая ошибка."""
+    order = []
+    for attempt in (lang, "rus", "eng"):
+        if attempt and attempt not in order:
+            order.append(attempt)
+    first = None
+    for attempt in order:
+        try:
+            return call(attempt)
+        except Exception as exc:
+            if first is None:
+                first = exc
+    raise first
+
+
 def configure_tesseract(cmd: str = "") -> None:
     if cmd:
         pytesseract.pytesseract.tesseract_cmd = cmd
@@ -35,16 +51,12 @@ def preprocess_for_ocr(image: Image.Image, scale: float = 2.0) -> np.ndarray:
     return thr
 
 
-def read_text(image: Image.Image, lang: str = "eng+rus", whitelist: str = "") -> str:
-    cfg = "--psm 6"
+def read_text(image: Image.Image, lang: str = "eng+rus", whitelist: str = "", psm: int = 6) -> str:
+    cfg = f"--psm {psm}"
     if whitelist:
         cfg += f" -c tessedit_char_whitelist={whitelist}"
     prepared = preprocess_for_ocr(image)
-    try:
-        return pytesseract.image_to_string(prepared, lang=lang, config=cfg) or ""
-    except Exception:
-        # fallback without rus traineddata
-        return pytesseract.image_to_string(prepared, lang="eng", config=cfg) or ""
+    return _ocr(lambda attempt: pytesseract.image_to_string(prepared, lang=attempt, config=cfg) or "", lang)
 
 
 def normalize_phone(raw: str) -> Optional[str]:
@@ -110,19 +122,21 @@ def find_label_box(
     image: Image.Image,
     label: str,
     lang: str = "eng+rus",
+    scale: float = 1.5,
 ) -> Optional[tuple[int, int, int, int]]:
     """OCR word boxes and find a box whose text contains label fragments."""
-    prepared = preprocess_for_ocr(image, scale=1.5)
-    try:
-        data = pytesseract.image_to_data(
-            prepared, lang=lang, output_type=pytesseract.Output.DICT
-        )
-    except Exception:
-        data = pytesseract.image_to_data(
-            prepared, lang="eng", output_type=pytesseract.Output.DICT
-        )
+    words = word_boxes(image, lang=lang, scale=scale)
+    return box_for_label(words, label)
 
-    scale = 1.5
+
+def word_boxes(image: Image.Image, lang: str = "eng+rus", scale: float = 1.0) -> list[dict]:
+    prepared = preprocess_for_ocr(image, scale=scale)
+    data = _ocr(
+        lambda attempt: pytesseract.image_to_data(
+            prepared, lang=attempt, output_type=pytesseract.Output.DICT, config="--psm 6"
+        ),
+        lang,
+    )
     words = []
     for i, txt in enumerate(data.get("text", [])):
         txt = (txt or "").strip()
@@ -137,13 +151,14 @@ def find_label_box(
                 "height": int(data["height"][i] / scale),
             }
         )
+    return words
 
+
+def box_for_label(words: list[dict], label: str) -> Optional[tuple[int, int, int, int]]:
     needle = re.sub(r"\s+", " ", label.lower()).strip(" :")
     parts = [p for p in re.split(r"\s+", needle) if len(p) > 2]
     if not parts:
         return None
-
-    # sliding window over OCR words
     for i in range(len(words)):
         chunk = []
         left = words[i]["left"]
@@ -151,13 +166,12 @@ def find_label_box(
         right = left + words[i]["width"]
         bottom = top + words[i]["height"]
         for j in range(i, min(i + max(6, len(parts) + 2), len(words))):
-            w = words[j]
-            # keep roughly same line
-            if abs(w["top"] - top) > 25:
+            word = words[j]
+            if abs(word["top"] - top) > 25:
                 break
-            chunk.append(w["text"].lower())
-            right = max(right, w["left"] + w["width"])
-            bottom = max(bottom, w["top"] + w["height"])
+            chunk.append(word["text"].lower())
+            right = max(right, word["left"] + word["width"])
+            bottom = max(bottom, word["top"] + word["height"])
             joined = " ".join(chunk)
             if all(p in joined for p in parts[: min(3, len(parts))]):
                 return left, top, right - left, bottom - top

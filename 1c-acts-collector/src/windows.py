@@ -9,6 +9,7 @@ from PIL import Image
 
 try:
     import win32api
+    import win32clipboard
     import win32con
     import win32gui
     import win32process
@@ -65,6 +66,44 @@ def find_window(substr: str) -> Optional[WindowInfo]:
         return None
     # prefer largest visible window
     return max(wins, key=lambda w: w.width * w.height)
+
+
+# В такси-интерфейсе отчёт — вкладка. Заголовок окна Windows при этом
+# «… / Управление торговлей … (1С:Предприятие)», а не имя отчёта.
+ONE_C_TITLE_HINTS = (
+    "1С:Предприятие",
+    "1C:Предприятие",
+    "1C:Enterprise",
+    "Управление торговлей",
+)
+
+
+def find_1c_window(extra: str = "") -> Optional[WindowInfo]:
+    needles: list[str] = []
+    if extra:
+        needles.append(extra)
+    needles.extend(ONE_C_TITLE_HINTS)
+    seen: set[str] = set()
+    for needle in needles:
+        key = needle.casefold()
+        if not needle or key in seen:
+            continue
+        seen.add(key)
+        win = find_window(needle)
+        if win and win.width >= 400 and win.height >= 300:
+            return win
+    return None
+
+
+def describe_windows(limit: int = 20) -> str:
+    lines: list[str] = []
+    for win in _enum_windows():
+        if win.width < 200 or win.height < 120:
+            continue
+        lines.append(f"- {win.title}")
+        if len(lines) >= limit:
+            break
+    return "\n".join(lines) if lines else "(нет видимых окон)"
 
 
 def find_window_title_startswith(prefix: str) -> Optional[WindowInfo]:
@@ -140,9 +179,16 @@ def click_window_relative(
     x: int,
     y: int,
     double: bool = False,
+    image_size: Optional[tuple[int, int]] = None,
 ) -> None:
-    left, top, _, _ = win32gui.GetWindowRect(hwnd)
-    click_screen(left + x, top + y, double=double, hwnd=hwnd)
+    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+    if image_size and image_size[0] and image_size[1]:
+        win_w = max(1, right - left)
+        win_h = max(1, bottom - top)
+        if image_size != (win_w, win_h):
+            x = int(round(x * win_w / image_size[0]))
+            y = int(round(y * win_h / image_size[1]))
+    click_screen(left + int(x), top + int(y), double=double, hwnd=hwnd)
 
 
 def send_keys(hwnd: int, *vk_keys: int) -> None:
@@ -177,6 +223,104 @@ def press_escape(hwnd: int) -> None:
 
 def press_down(hwnd: int) -> None:
     send_keys(hwnd, win32con.VK_DOWN)
+
+
+def press_find(hwnd: int) -> None:
+    """Ctrl+F — открыть поиск в списке 1С."""
+    send_keys(hwnd, win32con.VK_CONTROL, 0x46)
+
+
+def send_to_focused(*vk_keys: int) -> None:
+    """Клавиши в то поле, которое уже открыл Ctrl+F. Окно заново не активируем."""
+    for vk in vk_keys:
+        win32api.keybd_event(vk, 0, 0, 0)
+    time.sleep(0.03)
+    for vk in reversed(vk_keys):
+        win32api.keybd_event(vk, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+
+def paste_focused(text: str) -> None:
+    """Вставить текст в уже активное поле поиска, не щёлкая и не переводя фокус."""
+    previous = _clipboard_get()
+    try:
+        _clipboard_set(text)
+    except Exception:
+        return
+    send_to_focused(win32con.VK_CONTROL, 0x41)
+    time.sleep(0.05)
+    send_to_focused(win32con.VK_CONTROL, 0x56)
+    time.sleep(0.2)
+    try:
+        _clipboard_set(previous)
+    except Exception:
+        pass
+
+
+def press_enter_focused() -> None:
+    send_to_focused(win32con.VK_RETURN)
+
+
+def paste_text(hwnd: int, text: str) -> None:
+    """Выделить поле и вставить текст. Прежний буфер возвращается после вставки."""
+    previous = _clipboard_get()
+    try:
+        _clipboard_set(text)
+    except Exception:
+        return
+    send_keys(hwnd, win32con.VK_CONTROL, 0x41)
+    time.sleep(0.05)
+    send_keys(hwnd, win32con.VK_CONTROL, 0x56)
+    time.sleep(0.15)
+    try:
+        _clipboard_set(previous)
+    except Exception:
+        pass
+
+
+def _clipboard_get() -> str:
+    try:
+        win32clipboard.OpenClipboard()
+    except Exception:
+        return ""
+    try:
+        if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+            return ""
+        data = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+        return data or ""
+    except Exception:
+        return ""
+    finally:
+        try:
+            win32clipboard.CloseClipboard()
+        except Exception:
+            pass
+
+
+def _clipboard_set(text: str) -> None:
+    win32clipboard.OpenClipboard()
+    try:
+        win32clipboard.EmptyClipboard()
+        if text:
+            win32clipboard.SetClipboardText(text, win32con.CF_UNICODETEXT)
+    finally:
+        win32clipboard.CloseClipboard()
+
+
+def copy_active_cell(hwnd: int) -> str:
+    """Ctrl+C текущей ячейки списка. Прежнее содержимое буфера возвращается назад."""
+    previous = _clipboard_get()
+    try:
+        _clipboard_set("")
+    except Exception:
+        return ""
+    send_keys(hwnd, win32con.VK_CONTROL, 0x43)
+    time.sleep(0.35)
+    copied = _clipboard_get()
+    try:
+        _clipboard_set(previous)
+    except Exception:
+        pass
+    return copied or ""
 
 
 def press_enter(hwnd: int) -> None:
