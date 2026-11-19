@@ -27,6 +27,7 @@ namespace SborAktov
     internal sealed class MainForm : Form
     {
         private readonly TextBox _log;
+        private readonly Label _counter;
         private readonly Button _button;
         private readonly object _gate = new object();
         private volatile bool _running;
@@ -46,7 +47,16 @@ namespace SborAktov
                 Dock = DockStyle.Top,
                 Height = 96,
                 Padding = new Padding(12, 10, 12, 4),
-                Text = "Откройте в 1С отчёт «Обращения клиентов. Акты оценки» и поставьте курсор на первый акт.\r\nНажмите «Старт». Окно 1С не закрывайте: программа сама снимет сумму и телефон.\r\nОстановить — кнопка «Стоп»."
+                Text = "Откройте в 1С отчёт «Обращения клиентов. Акты оценки».\r\nНажмите «Старт». После «Стоп» или выключения компьютера нажмите «Старт» снова: программа продолжит с непроверенных актов.\r\nОкно 1С не закрывайте."
+            };
+
+            _counter = new Label
+            {
+                Dock = DockStyle.Top,
+                Height = 42,
+                Padding = new Padding(12, 8, 12, 4),
+                Font = new Font("Segoe UI", 14F, FontStyle.Bold),
+                Text = SavedCounterText()
             };
 
             _button = new Button
@@ -70,6 +80,7 @@ namespace SborAktov
 
             Controls.Add(_log);
             Controls.Add(_button);
+            Controls.Add(_counter);
             Controls.Add(help);
         }
 
@@ -521,7 +532,73 @@ namespace SborAktov
                 try { BeginInvoke((Action)delegate { Log(line); }); } catch { }
                 return;
             }
-            _log.AppendText(line + Environment.NewLine);
+            if (line != null && line.StartsWith("СЧЁТЧИК "))
+            {
+                _counter.Text = FormatCounter(line);
+                return;
+            }
+            _log.AppendText((line ?? "") + Environment.NewLine);
+        }
+
+        private static string SavedCounterText()
+        {
+            string csv = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Sbor-aktov-1C",
+                "output",
+                "акты.csv");
+            int got = 0;
+            int lost = 0;
+            if (!File.Exists(csv))
+                return "Собрано: 0    Не собрано: 0";
+            foreach (string raw in File.ReadAllLines(csv))
+            {
+                if (string.IsNullOrWhiteSpace(raw) || raw.StartsWith("Акт;"))
+                    continue;
+                string[] parts = raw.Split(';');
+                if (parts.Length == 0 || string.IsNullOrWhiteSpace(parts[0]))
+                    continue;
+                string phone = parts.Length > 4 ? parts[4] : "";
+                if (PhoneCollected(phone))
+                    got++;
+                else
+                    lost++;
+            }
+            return "Собрано: " + got + "    Не собрано: " + lost;
+        }
+
+        private static string FormatCounter(string line)
+        {
+            string got = Piece(line, "собрано=");
+            string lost = Piece(line, "не собрано=");
+            string left = Piece(line, "осталось=");
+            return "Собрано: " + got + "    Не собрано: " + lost + "    Осталось: " + left;
+        }
+
+        private static string Piece(string line, string key)
+        {
+            int start = line.IndexOf(key, StringComparison.Ordinal);
+            if (start < 0)
+                return "0";
+            start += key.Length;
+            int end = line.IndexOf(' ', start);
+            if (end < 0)
+                end = line.Length;
+            return line.Substring(start, end - start);
+        }
+
+        private static bool PhoneCollected(string raw)
+        {
+            var digits = new System.Text.StringBuilder();
+            foreach (char ch in raw ?? "")
+            {
+                if (ch >= '0' && ch <= '9')
+                    digits.Append(ch);
+            }
+            string text = digits.ToString();
+            if (text.Length == 11 && (text[0] == '7' || text[0] == '8'))
+                text = text.Substring(1);
+            return text.Length == 10 && text[0] == '9';
         }
     }
 }

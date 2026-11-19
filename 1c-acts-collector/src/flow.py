@@ -238,13 +238,37 @@ def publish_table(temporary: Path, target: Path) -> Path:
 
 def collected_acts(csv_path: Path) -> set[str]:
     """Акты, у которых в таблице уже лежит телефон из 10 цифр на 9."""
+    collected, _missed = split_saved_acts(csv_path)
+    return collected
+
+
+def split_saved_acts(csv_path: Path) -> tuple[set[str], set[str]]:
+    """Уже проверенные акты: с номером и без номера. Переживают остановку и выключение."""
+    collected: set[str] = set()
+    missed: set[str] = set()
     if not csv_path.exists():
-        return set()
-    found: set[str] = set()
+        return collected, missed
     for row in _read_table(csv_path):
-        if row and revealed_phone(row[4] if len(row) > 4 else ""):
-            found.add(row[0])
-    return found
+        if not row or not row[0]:
+            continue
+        title = row[0]
+        if revealed_phone(row[4] if len(row) > 4 else ""):
+            collected.add(title)
+            missed.discard(title)
+        elif title not in collected:
+            missed.add(title)
+    return collected, missed
+
+
+def print_counter(titles: list[str], collected: set[str], missed: set[str]) -> None:
+    got = sum(1 for title in titles if title in collected)
+    lost = sum(1 for title in titles if title in missed and title not in collected)
+    left = max(0, len(titles) - got - lost)
+    print(f"СЧЁТЧИК собрано={got} не собрано={lost} осталось={left}", flush=True)
+    print(
+        f"Собрано номеров: {got}. Не собрано: {lost}. Осталось проверить: {left}.",
+        flush=True,
+    )
 
 
 def append_result(csv_path: Path, log_path: Path, result: ActResult) -> None:
@@ -1227,11 +1251,9 @@ def remember_result(
         print("Ошибка не останавливает сбор, перехожу к следующему акту.", flush=True)
         return processed
     append_result(csv_path, log_path, result)
-    if revealed_phone(result.phone):
-        done.add(result.act_title)
-    else:
-        done.discard(result.act_title)
-        print("Номер не собран, этот акт будет взят снова.", flush=True)
+    done.add(result.act_title)
+    if not revealed_phone(result.phone):
+        print("Номер не собран. Акт записан и при следующем запуске не повторяется.", flush=True)
     processed += 1
     print(
         f"[{processed}] {result.status}: {result.act_title} | "
@@ -1255,16 +1277,29 @@ def run_requested_list(
 ) -> None:
     """Идёт по файлу: Ctrl+F, вставка акта, «Искать», затем обычный сбор номера."""
     lang = cfg["ocr"].get("lang", "eng+rus")
-    print(f"Актов в файле: {len(titles)}. Листание вниз не используется.", flush=True)
+    collected, missed = split_saved_acts(csv_path)
+    done.update(collected)
+    done.update(missed)
+    print(f"Актов в файле: {len(titles)}. Уже проверенные пропускаются.", flush=True)
+    print_counter(titles, collected, missed)
     processed = 0
+    resumed = False
+    skipped = 0
     for index, title in enumerate(titles, start=1):
         pause.wait_if_paused()
         if pause.stop:
             break
-        print(f"Список {index}/{len(titles)}: {title}", flush=True)
         if title in done:
-            print(f"Пропуск (уже было): {title}", flush=True)
+            skipped += 1
             continue
+        if not resumed:
+            if skipped:
+                print(
+                    f"Уже проверено: {skipped}. Продолжаю со следующего, без повтора.",
+                    flush=True,
+                )
+            resumed = True
+        print(f"Список {index}/{len(titles)}: {title}", flush=True)
         try:
             if not search_for_act(list_win, title, lang):
                 processed = remember_result(
@@ -1281,14 +1316,37 @@ def run_requested_list(
                     ),
                     processed,
                 )
+                collected, missed = split_saved_acts(csv_path)
+                print_counter(titles, collected, missed)
                 continue
             result = process_one_act(cfg, list_win, pause, done, expected=title)
             if pause.stop or result.status == "stopped":
                 break
             processed = remember_result(csv_path, log_path, done, result, processed)
+            collected, missed = split_saved_acts(csv_path)
+            print_counter(titles, collected, missed)
         except Exception as exc:
             print(f"Ошибка: {exc}", flush=True)
             print("Ошибка не останавливает сбор, перехожу к следующему акту.", flush=True)
+            try:
+                remember_result(
+                    csv_path,
+                    log_path,
+                    done,
+                    ActResult(
+                        act_title=title,
+                        amount="",
+                        phone="",
+                        status="error",
+                        error=str(exc),
+                        collected_at=_now(),
+                    ),
+                    processed,
+                )
+                collected, missed = split_saved_acts(csv_path)
+                print_counter(titles, collected, missed)
+            except Exception:
+                pass
             try:
                 back_to_list(list_win)
             except Exception:
