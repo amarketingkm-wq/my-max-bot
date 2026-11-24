@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="850" viewBox="0 0 600 850">
+  <rect width="600" height="850" fill="#f5f2ed"/>
+  <rect x="28" y="28" width="544" height="794" fill="none" stroke="#b08d57" stroke-width="2"/>
+  <rect x="40" y="40" width="520" height="770" fill="none" stroke="#b08d57" stroke-width="1"/>
+  <text x="300" y="400" text-anchor="middle" font-family="Georgia, serif" font-size="36" fill="#242424">Сертификат 15</text>
+  <text x="300" y="450" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#888">Замените своим изображением</text>
+  <text x="300" y="800" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#999">psychology61.ru</text>
+</svg>

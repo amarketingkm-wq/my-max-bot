@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#171717">
+<title>Контакты — Лана Аленникова</title>
+<meta name="description" content="Контактная информация психолога Ланы Аленниковой.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<button class="menu-toggle" id="menuToggle" aria-expanded="false" aria-controls="sidebar">☰ Меню</button>
+<div class="sidebar" id="sidebar">
+  <a class="sidebar-logo" href="index.html">АЛЕННИКОВА<span>практикующий психолог</span></a>
+  <nav class="menu" aria-label="Основная навигация">
+    <a href="index.html">Главная</a>
+    <a href="about.html">Кто я?</a>
+    <a href="courses.html">Курсы</a>
+    <a href="contacts.html">Контакты</a>
+  </nav>
+  <div class="sidebar-footer">© 2026<br><span>Сертификат официального преподавателя № 0433</span></div>
+</div>
+<div class="main">
+
+<section class="section section-light"><div class="section-heading"><div class="eyebrow">Связаться</div><h1>Контакты</h1><p class="lead">Для вопросов об обучающих программах и записи свяжитесь удобным способом.</p></div>
+<div class="contact-layout"><div><h3>Лана Аленникова</h3><p>Ростов-на-Дону</p><p><strong>Телефон</strong><br><a href="tel:+79287531119">+7 928 753 11 19</a></p><p><strong>Электронная почта</strong><br><a href="mailto:Alennikova2007@mail.ru">Alennikova2007@mail.ru</a></p><p><strong>Реквизиты</strong><br>ИП Аленникова Лана Станиславовна<br>ИНН 616704591508<br>ОГРНИП 318619600243957</p></div>
+<div class="contact-panel"><h3>Написать сообщение</h3><p class="text-small">Форма откроет почтовую программу с подготовленным письмом.</p><form id="contactForm"><div class="form-row"><label for="name">Ваше имя</label><input id="name" name="name" required></div><div class="form-row"><label for="email">Ваш email или телефон</label><input id="email" name="email" required></div><div class="form-row"><label for="message">Сообщение</label><textarea id="message" name="message" required></textarea></div><button class="btn" type="submit">Подготовить письмо</button></form></div></div></section>
+<script>
+document.addEventListener('DOMContentLoaded',()=>{const f=document.getElementById('contactForm');if(f)f.addEventListener('submit',e=>{e.preventDefault();const d=new FormData(f);const subject=encodeURIComponent('Сообщение с сайта psychology61.ru');const body=encodeURIComponent('Имя: '+d.get('name')+'\nКонтакт: '+d.get('email')+'\n\n'+d.get('message'));location.href='mailto:Alennikova2007@mail.ru?subject='+subject+'&body='+body;});});
+</script>
+
+</div>
+
+<footer class="site-footer">
+  <div class="footer-grid">
+    <div><strong>ИП Аленникова Лана Станиславовна</strong><br>ИНН 616704591508<br>ОГРНИП 318619600243957</div>
+    <div class="footer-links"><a href="offer.html">Договор оферты</a><a href="privacy.html">Политика конфиденциальности</a><a href="contacts.html">Контакты</a></div>
+    <div>Телефон: <a href="tel:+79287531119">+7 928 753 11 19</a><br>Email: <a href="mailto:Alennikova2007@mail.ru">Alennikova2007@mail.ru</a><br><button class="vision-btn" id="visionToggle" type="button">👁️ Версия для слабовидящих</button></div>
+  </div>
+  <div class="copyright">© 2026 Лана Аленникова. Все права защищены.</div>
+</footer>
+<div class="cookie-note" id="cookieNote"><p>Сайт использует cookie-файлы для корректной работы. Подробнее — в <a href="privacy.html">Политике обработки персональных данных</a>.</p><div class="cookie-actions"><button data-cookie-choice="accepted">Принять</button><button data-cookie-choice="declined">Отклонить</button></div></div>
+<script src="js/main.js"></script></body></html>
